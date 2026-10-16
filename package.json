@@ -1,0 +1,27 @@
+{
+  "name": "mpc-voicelink",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LAN-only browser Push-to-Talk voice system",
+  "packageManager": "npm@10.9.3",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo run dev --parallel",
+    "dev:web": "turbo run dev --filter=@mpc-voicelink/web",
+    "dev:server": "turbo run dev --filter=@mpc-voicelink/server",
+    "build": "turbo run build",
+    "build:server": "turbo run build --filter=@mpc-voicelink/server",
+    "typecheck": "turbo run typecheck"
+  },
+  "devDependencies": {
+    "turbo": "^2.4.0"
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
+  }
+}
+
