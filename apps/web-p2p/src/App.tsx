@@ -49,6 +49,7 @@ export function App() {
   const [isMapOpen, setIsMapOpen] = useState(false);
   const [isShareOpen, setIsShareOpen] = useState(false);
   const [isAudioSettingsOpen, setIsAudioSettingsOpen] = useState(false);
+  const [showMap, setShowMap] = useState(false);
   const [playoutDelayMs, setPlayoutDelayMs] = useState(0);
   const [hangTimeMs, setHangTimeMs] = useState(150);
   const [inputGain, setInputGain] = useState(1.0);
@@ -351,21 +352,44 @@ export function App() {
               creatorClientId={members.find((m) => m.isAdmin)?.clientId}
             />
 
-            {/* Main Interactive Radar & PTT Grid */}
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-center">
-              {/* Tactical Radar Frame (5 cols on desktop) */}
-              <div className="lg:col-span-5 hidden sm:block">
-                <TacticalMapFrame
-                  currentClientId={clientIdRef.current}
-                  myPosition={position}
-                  members={members}
-                  speakerClientId={speaker?.clientId}
-                  onPositionChange={handlePositionChange}
-                />
-              </div>
+            {/* Main Interactive Radar & PTT Grid (Temporarily hidden by default) */}
+            {showMap ? (
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-center">
+                {/* Tactical Radar Frame (5 cols on desktop) */}
+                <div className="lg:col-span-5 hidden sm:block">
+                  <TacticalMapFrame
+                    currentClientId={clientIdRef.current}
+                    myPosition={position}
+                    members={members}
+                    speakerClientId={speaker?.clientId}
+                    onPositionChange={handlePositionChange}
+                  />
+                </div>
 
-              {/* Push-To-Talk Button Cockpit (7 cols on desktop) */}
-              <div className="lg:col-span-7 flex flex-col items-center justify-center p-4 sm:p-6 rounded-3xl bg-slate-900/40 border border-white/5 backdrop-blur-xl">
+                {/* Push-To-Talk Button Cockpit (7 cols on desktop) */}
+                <div className="lg:col-span-7 flex flex-col items-center justify-center p-4 sm:p-6 rounded-3xl bg-slate-900/40 border border-white/5 backdrop-blur-xl">
+                  <PttButton
+                    phase={phase}
+                    remoteAudioActive={remoteAudioActive}
+                    pttDisabled={pttDisabled}
+                    pttCaption={pttCaption}
+                    onRequestFloor={handleRequestFloor}
+                    onReleaseFloor={handleReleaseFloor}
+                  />
+
+                  {/* Mobile Button to Open Radar Map */}
+                  <button
+                    type="button"
+                    onClick={() => setIsMapOpen(true)}
+                    className="sm:hidden mt-2 flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-800/90 border border-white/10 text-xs font-bold text-orange-400 hover:text-orange-300 transition cursor-pointer"
+                  >
+                    <Map className="w-4 h-4" />
+                    <span>Mở Sơ Đồ Radar (30m - 50m)</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="max-w-xl mx-auto w-full flex flex-col items-center justify-center p-6 sm:p-10 rounded-3xl bg-slate-900/40 border border-white/5 backdrop-blur-xl shadow-2xl">
                 <PttButton
                   phase={phase}
                   remoteAudioActive={remoteAudioActive}
@@ -374,18 +398,8 @@ export function App() {
                   onRequestFloor={handleRequestFloor}
                   onReleaseFloor={handleReleaseFloor}
                 />
-
-                {/* Mobile Button to Open Radar Map */}
-                <button
-                  type="button"
-                  onClick={() => setIsMapOpen(true)}
-                  className="sm:hidden mt-2 flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-800/90 border border-white/10 text-xs font-bold text-orange-400 hover:text-orange-300 transition cursor-pointer"
-                >
-                  <Map className="w-4 h-4" />
-                  <span>Mở Sơ Đồ Radar (30m - 50m)</span>
-                </button>
               </div>
-            </div>
+            )}
           </div>
         )}
       </main>
