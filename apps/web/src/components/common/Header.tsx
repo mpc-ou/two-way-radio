@@ -50,10 +50,7 @@ export function Header({
             alt="MPC Logo"
             className="w-7 h-7 sm:w-9 sm:h-9 rounded-xl object-contain drop-shadow-[0_0_12px_rgba(249,115,22,0.4)] hover:scale-105 transition-transform"
           />
-          <span className="absolute -top-0.5 -right-0.5 flex h-2 w-2 sm:h-2.5 sm:w-2.5">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-            <span className="relative inline-flex rounded-full h-full w-full bg-emerald-500" />
-          </span>
+         
         </div>
 
         <div className="flex flex-col">

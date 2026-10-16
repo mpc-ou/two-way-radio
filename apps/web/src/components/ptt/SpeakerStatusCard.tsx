@@ -35,20 +35,42 @@ export function SpeakerStatusCard({
     >
       {/* Wave / Idle indicator box */}
       <div
-        className={`flex items-center justify-center w-10 h-10 sm:w-12 sm:h-12 rounded-xl bg-slate-950/90 border overflow-hidden shrink-0 transition-all ${
+        className={`relative flex items-center justify-center w-11 h-11 sm:w-13 sm:h-13 rounded-2xl bg-slate-950/95 border overflow-hidden shrink-0 transition-all ${
           isSpeaking
             ? isMeSpeaker
-              ? 'border-rose-500/60 shadow-[0_0_14px_rgba(244,63,94,0.3)]'
-              : 'border-orange-500/60 shadow-[0_0_14px_rgba(249,115,22,0.3)]'
+              ? 'border-rose-500 shadow-[0_0_18px_rgba(244,63,94,0.4)]'
+              : 'border-orange-500 shadow-[0_0_18px_rgba(249,115,22,0.4)]'
             : 'border-white/10'
         }`}
       >
         {isSpeaking ? (
-          <AudioEqualizer isMe={isMeSpeaker} inputLevel={metrics.inputLevel} />
+          <div className="relative flex items-center justify-center w-full h-full p-1.5">
+            {/* Pulsing ambient halo behind icon */}
+            <span
+              className={`absolute inset-1.5 rounded-xl opacity-35 animate-ping ${
+                isMeSpeaker ? 'bg-rose-500' : 'bg-orange-500'
+              }`}
+            />
+
+            {/* Center Dynamic Icon */}
+            <div
+              className={`relative z-10 p-2 rounded-xl border flex items-center justify-center ${
+                isMeSpeaker
+                  ? 'bg-rose-500/20 border-rose-500/60 text-rose-300 shadow-[0_0_14px_rgba(244,63,94,0.6)]'
+                  : 'bg-orange-500/20 border-orange-500/60 text-orange-300 shadow-[0_0_14px_rgba(249,115,22,0.6)]'
+              }`}
+            >
+              {isMeSpeaker ? (
+                <Mic className="w-5 h-5 sm:w-6 sm:h-6 text-rose-300 animate-pulse" />
+              ) : (
+                <Radio className="w-5 h-5 sm:w-6 sm:h-6 text-orange-300 animate-pulse" />
+              )}
+            </div>
+          </div>
         ) : (
           <div className="relative flex items-center justify-center">
-            <Radio className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-400" />
-            <span className="animate-ping absolute inline-flex h-3.5 w-3.5 sm:h-4 sm:w-4 rounded-full bg-emerald-400 opacity-20" />
+            <Radio className="w-5 h-5 text-emerald-400" />
+            <span className="animate-ping absolute inline-flex h-4 w-4 rounded-full bg-emerald-400 opacity-25" />
           </div>
         )}
       </div>
