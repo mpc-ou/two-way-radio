@@ -48,6 +48,12 @@ export class P2PMeshClient {
   private talkStartTimestamp = 0;
   private audioElement: HTMLAudioElement | null = null;
 
+  private playoutDelayMs = 0;
+  private hangTimeMs = 150;
+  private hangTimer: number | null = null;
+  private inputGain = 1.0;
+  private outputGain = 1.0;
+
   constructor(
     private readonly events: P2PMeshEvents,
     private readonly myMember: P2PMember,
@@ -56,6 +62,46 @@ export class P2PMeshClient {
 
   setAudioElement(element: HTMLAudioElement | null) {
     this.audioElement = element;
+    if (this.audioElement) {
+      this.audioElement.volume = Math.min(1.0, this.outputGain);
+    }
+  }
+
+  setPlayoutDelay(ms: number) {
+    this.playoutDelayMs = Math.max(0, ms);
+    for (const call of this.mediaConnections.values()) {
+      this.applyPlayoutDelayToCall(call);
+    }
+  }
+
+  setHangTime(ms: number) {
+    this.hangTimeMs = Math.max(0, ms);
+  }
+
+  setInputGain(gain: number) {
+    this.inputGain = Math.max(0.1, gain);
+  }
+
+  setOutputGain(gain: number) {
+    this.outputGain = Math.max(0, gain);
+    if (this.audioElement) {
+      this.audioElement.volume = Math.min(1.0, this.outputGain);
+    }
+  }
+
+  private applyPlayoutDelayToCall(call: MediaConnection) {
+    try {
+      const pc = call.peerConnection;
+      if (!pc) return;
+      const receivers = pc.getReceivers();
+      for (const receiver of receivers) {
+        if ('playoutDelayHint' in receiver) {
+          (receiver as any).playoutDelayHint = this.playoutDelayMs / 1000;
+        }
+      }
+    } catch {
+      // PlayoutDelayHint not supported by this browser
+    }
   }
 
   async connect(): Promise<void> {
@@ -170,8 +216,10 @@ export class P2PMeshClient {
     this.mediaConnections.set(call.peer, call);
 
     call.on('stream', (remoteStream) => {
+      this.applyPlayoutDelayToCall(call);
       if (this.audioElement) {
         this.audioElement.srcObject = remoteStream;
+        this.audioElement.volume = Math.min(1.0, this.outputGain);
         void this.audioElement.play().catch(() => undefined);
       }
       this.events.onRemoteAudioActive(true);
@@ -329,6 +377,11 @@ export class P2PMeshClient {
 
   // Push-To-Talk Actions
   async startTalking(): Promise<boolean> {
+    if (this.hangTimer) {
+      window.clearTimeout(this.hangTimer);
+      this.hangTimer = null;
+    }
+
     if (this.currentSpeaker && this.currentSpeaker.clientId !== this.myMember.clientId) {
       this.events.onStatusChange('Kênh đang bận. Có người khác đang phát biểu.');
       return false;
@@ -381,6 +434,23 @@ export class P2PMeshClient {
   }
 
   stopTalking() {
+    if (this.currentSpeaker?.clientId === this.myMember.clientId) {
+      if (this.hangTimer) {
+        window.clearTimeout(this.hangTimer);
+      }
+
+      if (this.hangTimeMs > 0) {
+        this.hangTimer = window.setTimeout(() => {
+          this.hangTimer = null;
+          this.executeStopTalking();
+        }, this.hangTimeMs);
+      } else {
+        this.executeStopTalking();
+      }
+    }
+  }
+
+  private executeStopTalking() {
     if (this.currentSpeaker?.clientId === this.myMember.clientId) {
       this.currentSpeaker = null;
       this.events.onSpeakerChange(null);
@@ -446,6 +516,10 @@ export class P2PMeshClient {
   }
 
   close() {
+    if (this.hangTimer) {
+      window.clearTimeout(this.hangTimer);
+      this.hangTimer = null;
+    }
     if (this.metricInterval) clearInterval(this.metricInterval);
     if (this.localStream) {
       this.localStream.getTracks().forEach((t) => t.stop());

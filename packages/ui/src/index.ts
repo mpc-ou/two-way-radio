@@ -25,4 +25,5 @@ export * from './components/map/TacticalMapFrame';
 // Modals
 export * from './components/modals/TacticalMapModal';
 export * from './components/modals/ShareModal';
+export * from './components/modals/AudioSettingsModal';
 

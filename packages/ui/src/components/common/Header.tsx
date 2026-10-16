@@ -23,6 +23,7 @@ export interface HeaderProps {
   modeLabel?: string;
   onToggleSpeaker?: () => void;
   onOpenAdmin?: () => void;
+  onOpenSettings?: () => void;
   onOpenShare?: () => void;
   onDisconnect: () => void;
   logoSrc?: string;
@@ -38,6 +39,7 @@ export function Header({
   modeLabel = 'P2P DIRECT',
   onToggleSpeaker,
   onOpenAdmin,
+  onOpenSettings,
   onOpenShare,
   onDisconnect,
   logoSrc = '/mpc-logo.webp'
@@ -111,6 +113,19 @@ export function Header({
             </button>
           )}
 
+          {/* Audio Settings / Delay Button */}
+          {onOpenSettings && (
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              className="p-1.5 sm:px-3 sm:py-1.5 rounded-xl bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/30 text-xs font-bold text-orange-300 transition flex items-center gap-1.5 cursor-pointer"
+              title="Cài đặt Độ trễ & Âm thanh"
+            >
+              <SlidersHorizontal className="w-4 h-4 text-orange-400" />
+              <span className="hidden md:inline">Độ Trễ & Mic</span>
+            </button>
+          )}
+
           {/* Admin Controls */}
           {isRoomAdmin && onOpenAdmin && (
             <button
@@ -173,6 +188,20 @@ export function Header({
               >
                 <Share2 className="w-3.5 h-3.5" />
                 <span>Mời / QR</span>
+              </button>
+            )}
+
+            {onOpenSettings && (
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  onOpenSettings();
+                }}
+                className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-orange-500/15 border border-orange-500/30 text-xs font-bold text-orange-300"
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5" />
+                <span>Độ trễ & Mic</span>
               </button>
             )}
 

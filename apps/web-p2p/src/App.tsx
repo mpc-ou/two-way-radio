@@ -9,6 +9,7 @@ import {
   TacticalMapFrame,
   TacticalMapModal,
   ShareModal,
+  AudioSettingsModal,
   newClientId,
   getDefaultPositionForDept,
   type DepartmentId,
@@ -19,7 +20,7 @@ import {
 import { P2PMeshClient, type P2PMember } from './services/p2pMeshClient';
 import { JoinP2PRoomCard } from './components/JoinP2PRoomCard';
 import type { VoiceLinkMode } from './components/GatewayModeSelector';
-import { Map, Sun, Moon, Radio, Sparkles } from 'lucide-react';
+import { Map, Sun, Moon, Radio, Sparkles, SlidersHorizontal } from 'lucide-react';
 
 export function App() {
   const [mode, setMode] = useState<VoiceLinkMode>('p2p');
@@ -47,6 +48,11 @@ export function App() {
 
   const [isMapOpen, setIsMapOpen] = useState(false);
   const [isShareOpen, setIsShareOpen] = useState(false);
+  const [isAudioSettingsOpen, setIsAudioSettingsOpen] = useState(false);
+  const [playoutDelayMs, setPlayoutDelayMs] = useState(0);
+  const [hangTimeMs, setHangTimeMs] = useState(150);
+  const [inputGain, setInputGain] = useState(1.0);
+  const [outputGain, setOutputGain] = useState(1.0);
 
   const clientIdRef = useRef(newClientId());
   const clientRef = useRef<P2PMeshClient | null>(null);
@@ -140,6 +146,10 @@ export function App() {
     );
 
     client.setAudioElement(audioElementRef.current);
+    client.setPlayoutDelay(playoutDelayMs);
+    client.setHangTime(hangTimeMs);
+    client.setInputGain(inputGain);
+    client.setOutputGain(outputGain);
     clientRef.current = client;
 
     client
@@ -151,6 +161,26 @@ export function App() {
         setConnecting(false);
         setNotice(`Không thể kết nối: ${err instanceof Error ? err.message : 'Lỗi P2P'}`);
       });
+  }
+
+  function handlePlayoutDelayChange(val: number) {
+    setPlayoutDelayMs(val);
+    clientRef.current?.setPlayoutDelay(val);
+  }
+
+  function handleHangTimeChange(val: number) {
+    setHangTimeMs(val);
+    clientRef.current?.setHangTime(val);
+  }
+
+  function handleInputGainChange(val: number) {
+    setInputGain(val);
+    clientRef.current?.setInputGain(val);
+  }
+
+  function handleOutputGainChange(val: number) {
+    setOutputGain(val);
+    clientRef.current?.setOutputGain(val);
   }
 
   function setConnectedUI() {
@@ -240,6 +270,7 @@ export function App() {
             setSpeakerEnabled(!speakerEnabled);
           }
         }}
+        onOpenSettings={() => setIsAudioSettingsOpen(true)}
         onOpenShare={() => setIsShareOpen(true)}
         onDisconnect={handleDisconnect}
       />
@@ -267,13 +298,13 @@ export function App() {
           />
         ) : (
           <div className="w-full flex flex-col gap-3 sm:gap-5 animate-in fade-in duration-200">
-            {/* Screen WakeLock Telemetry & Member Count Ribbon */}
-            <div className="flex items-center justify-between px-3 py-1.5 sm:px-4 sm:py-2 rounded-2xl bg-slate-900/90 border border-white/10 text-xs shadow-md">
-              <div className="flex items-center gap-2">
+            {/* Screen WakeLock Telemetry & Audio Delay Ribbon */}
+            <div className="flex items-center justify-between px-3 py-1.5 sm:px-4 sm:py-2 rounded-2xl bg-slate-900/90 border border-white/10 text-xs shadow-md flex-wrap gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 {wakeLockActive ? (
                   <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/40 text-amber-300 font-bold text-[0.62rem] sm:text-xs">
                     <Sun className="w-3.5 h-3.5 text-amber-400 animate-spin-slow" />
-                    <span>MÀN HÌNH LUÔN SÁNG (WAKELOCK ON)</span>
+                    <span>MÀN HÌNH LUÔN SÁNG</span>
                   </span>
                 ) : (
                   <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-slate-800 border border-white/10 text-slate-400 font-medium text-[0.62rem] sm:text-xs">
@@ -281,9 +312,18 @@ export function App() {
                     <span>MÀN HÌNH TỰ DO</span>
                   </span>
                 )}
-                <span className="hidden min-[480px]:inline text-slate-500 text-[0.62rem]">
-                  • Giữ kết nối P2P liên tục
-                </span>
+
+                {/* Audio Delay & Hang Time Quick Pill */}
+                <button
+                  type="button"
+                  onClick={() => setIsAudioSettingsOpen(true)}
+                  className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/30 text-orange-300 font-bold text-[0.62rem] sm:text-xs transition cursor-pointer"
+                  title="Bấm để chỉnh độ trễ âm thanh"
+                >
+                  <SlidersHorizontal className="w-3 h-3 text-orange-400" />
+                  <span>ĐỘ TRỄ: <strong className="font-mono text-white">{playoutDelayMs}ms</strong></span>
+                  <span className="hidden min-[600px]:inline text-slate-400 font-normal">• Đệm: {hangTimeMs}ms</span>
+                </button>
               </div>
 
               {/* Members Mesh Online Scale Pill */}
@@ -376,6 +416,20 @@ export function App() {
         isOpen={isShareOpen}
         roomId={roomId}
         onClose={() => setIsShareOpen(false)}
+      />
+
+      {/* Audio Settings Modal (Playout Delay, Jitter Buffer, Hang Time, Gains) */}
+      <AudioSettingsModal
+        isOpen={isAudioSettingsOpen}
+        onClose={() => setIsAudioSettingsOpen(false)}
+        playoutDelayMs={playoutDelayMs}
+        onPlayoutDelayChange={handlePlayoutDelayChange}
+        hangTimeMs={hangTimeMs}
+        onHangTimeChange={handleHangTimeChange}
+        inputGain={inputGain}
+        onInputGainChange={handleInputGainChange}
+        outputGain={outputGain}
+        onOutputGainChange={handleOutputGainChange}
       />
 
       {/* Shared Footer from @mpc-voicelink/ui */}
