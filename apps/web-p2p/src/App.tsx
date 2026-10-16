@@ -375,6 +375,7 @@ export function App() {
                     pttCaption={pttCaption}
                     onRequestFloor={handleRequestFloor}
                     onReleaseFloor={handleReleaseFloor}
+                    inputLevel={metrics.inputLevel}
                   />
 
                   {/* Mobile Button to Open Radar Map */}
@@ -397,6 +398,7 @@ export function App() {
                   pttCaption={pttCaption}
                   onRequestFloor={handleRequestFloor}
                   onReleaseFloor={handleReleaseFloor}
+                  inputLevel={metrics.inputLevel}
                 />
               </div>
             )}

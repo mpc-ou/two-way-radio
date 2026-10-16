@@ -75,6 +75,7 @@ export function PttTerminal({
           pttCaption={pttCaption}
           onRequestFloor={onRequestFloor}
           onReleaseFloor={onReleaseFloor}
+          inputLevel={metrics.inputLevel}
         />
 
         {/* Quick Voice Controls Dock */}
