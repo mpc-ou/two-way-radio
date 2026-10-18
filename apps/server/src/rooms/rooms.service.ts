@@ -1,14 +1,18 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { readConfig } from '../config/config.js';
-import type { FloorReleasedPayload, Position2D, RoomStatePayload } from '@mpc-voicelink/protocol';
+import { readConfig, type ChannelConfig } from '../config/config.js';
+import {
+  CHAT_HISTORY_SIZE,
+  type ChannelInfo,
+  type ChatMessage,
+  type FloorReleasedPayload,
+  type RoomStatePayload
+} from '@mpc-voicelink/protocol';
 
 interface Member {
   clientId: string;
   displayName: string;
-  department?: string;
-  position?: Position2D;
   socketId: string;
   lastHeartbeatAt: number;
 }
@@ -19,12 +23,25 @@ interface FloorLease {
   expiresAt: number;
 }
 
+/** Mỗi channel cấu hình là một room tồn tại suốt vòng đời server. */
 interface Room {
   roomId: string;
-  creatorClientId: string;
-  joinCode?: string;
+  name: string;
+  color: string;
+  pinHash?: Buffer;
   members: Map<string, Member>;
   floor?: FloorLease;
+  /** CHAT_HISTORY_SIZE tin gần nhất; chỉ trong RAM. */
+  chat: ChatMessage[];
+}
+
+export class JoinChannelError extends Error {
+  constructor(
+    readonly code: 'CHANNEL_NOT_FOUND' | 'PIN_REQUIRED' | 'PIN_INVALID' | 'CHANNEL_FULL',
+    message: string
+  ) {
+    super(message);
+  }
 }
 
 export type FloorRequestResult =
@@ -36,6 +53,10 @@ export interface FloorReleasedEvent {
   floorToken: string;
 }
 
+function hashPin(pin: string): Buffer {
+  return createHash('sha256').update(pin).digest();
+}
+
 @Injectable()
 export class RoomsService implements OnModuleDestroy {
   private readonly rooms = new Map<string, Room>();
@@ -45,75 +66,65 @@ export class RoomsService implements OnModuleDestroy {
 
   constructor() {
     this.expiryTimer.unref();
+    for (const channel of readConfig().channels) this.rooms.set(channel.id, this.createRoom(channel));
   }
 
   onFloorReleased(listener: (event: FloorReleasedEvent) => void): void {
     this.events.on('floorReleased', listener);
   }
 
-  join(input: { roomId: string; clientId: string; displayName: string; socketId: string; joinCode?: string; department?: string; position?: Position2D }): RoomStatePayload {
-    const config = readConfig();
-    const existing = this.rooms.get(input.roomId);
-    if (!existing) {
-      const roomJoinCode = input.joinCode?.trim() || config.roomJoinCode;
-      const room: Room = {
-        roomId: input.roomId,
-        creatorClientId: input.clientId,
-        joinCode: roomJoinCode,
-        members: new Map()
-      };
-      this.rooms.set(input.roomId, room);
-      room.members.set(input.clientId, {
-        clientId: input.clientId,
-        displayName: input.displayName,
-        department: input.department,
-        position: input.position,
-        socketId: input.socketId,
-        lastHeartbeatAt: Date.now()
-      });
-      return this.snapshot(room);
+  listChannels(): ChannelInfo[] {
+    const maxMembers = readConfig().maxMembersPerRoom;
+    return [...this.rooms.values()].map((room) => ({
+      id: room.roomId,
+      name: room.name,
+      color: room.color,
+      hasPin: Boolean(room.pinHash),
+      memberCount: room.members.size,
+      maxMembers,
+      ...(room.floor ? { speakerName: room.members.get(room.floor.clientId)?.displayName } : {})
+    }));
+  }
+
+  join(input: { roomId: string; clientId: string; displayName: string; socketId: string; pin?: string }): RoomStatePayload {
+    const room = this.rooms.get(input.roomId);
+    if (!room) throw new JoinChannelError('CHANNEL_NOT_FOUND', 'Channel không tồn tại.');
+
+    if (room.pinHash) {
+      if (!input.pin) throw new JoinChannelError('PIN_REQUIRED', 'Channel này cần mã PIN.');
+      if (!timingSafeEqual(room.pinHash, hashPin(input.pin.trim()))) {
+        throw new JoinChannelError('PIN_INVALID', 'Mã PIN không đúng.');
+      }
     }
 
-    const providedCode = input.joinCode?.trim() ?? '';
-    const roomCode = existing.joinCode ?? config.roomJoinCode;
-    const isMasterCode = Boolean(config.roomJoinCode && providedCode === config.roomJoinCode);
-    const isRoomCode = Boolean(roomCode && providedCode === roomCode);
-
-    if (roomCode && !isRoomCode && !isMasterCode) {
-      throw new Error('Mã phòng không chính xác.');
+    const isRejoin = room.members.has(input.clientId);
+    if (!isRejoin && room.members.size >= readConfig().maxMembersPerRoom) {
+      throw new JoinChannelError('CHANNEL_FULL', 'Channel đã đầy.');
     }
 
-    existing.members.set(input.clientId, {
+    room.members.set(input.clientId, {
       clientId: input.clientId,
       displayName: input.displayName,
-      department: input.department,
-      position: input.position ?? existing.members.get(input.clientId)?.position,
       socketId: input.socketId,
       lastHeartbeatAt: Date.now()
     });
-    return this.snapshot(existing);
-  }
-
-  updatePosition(roomId: string, clientId: string, position: Position2D): RoomStatePayload {
-    const room = this.requireMember(roomId, clientId);
-    const member = room.members.get(clientId);
-    if (member) {
-      member.position = position;
-    }
     return this.snapshot(room);
   }
 
-  leave(roomId: string, clientId: string): { state?: RoomStatePayload; released?: FloorReleasedPayload } {
+  /**
+   * Rời channel. Chỉ xóa member nếu nó vẫn thuộc socket này: khi client kết nối lại,
+   * socket mới có thể vào lại trước khi server xử lý disconnect của socket cũ.
+   */
+  leave(roomId: string, clientId: string, socketId: string): { state?: RoomStatePayload; released?: FloorReleasedPayload } {
     const room = this.rooms.get(roomId);
-    if (!room) return {};
+    const member = room?.members.get(clientId);
+    if (!room || !member || member.socketId !== socketId) return {};
 
     room.members.delete(clientId);
     const released = room.floor?.clientId === clientId
       ? this.release(room, 'disconnected')
       : undefined;
-    const state = room.members.size > 0 ? this.snapshot(room) : undefined;
-    if (room.members.size === 0) this.rooms.delete(roomId);
-    return { state, released };
+    return { state: this.snapshot(room), released };
   }
 
   requestFloor(roomId: string, clientId: string): FloorRequestResult {
@@ -142,34 +153,20 @@ export class RoomsService implements OnModuleDestroy {
     return this.release(room, 'released');
   }
 
-  forceReleaseFloor(roomId: string): { released?: FloorReleasedPayload; floorToken?: string; state?: RoomStatePayload } {
+  forceReleaseFloor(roomId: string): FloorReleasedPayload | undefined {
     const room = this.rooms.get(roomId);
-    if (!room || !room.floor) return {};
-    const floorToken = room.floor.token;
-    const released = this.release(room, 'force_released');
-    const state = this.snapshot(room);
-    return { released, floorToken, state };
+    if (!room?.floor) return undefined;
+    return this.release(room, 'force_released');
   }
 
-  validateAdmin(roomId: string, clientId: string, controlCode?: string): boolean {
-    const room = this.rooms.get(roomId);
-    if (!room) return false;
-    // 1. The room creator is always Admin!
-    if (room.creatorClientId === clientId) return true;
-
-    const config = readConfig();
+  /** Quyền admin LAN: mã vận hành AUDIO_CONTROL_CODE do người chạy server đặt. */
+  validateAdmin(controlCode?: string): boolean {
+    const serverAdminCode = readConfig().audioControlCode;
     const trimmed = controlCode?.trim();
-    if (!trimmed) return false;
-
-    // 2. Configured or default audioControlCode
-    const serverAdminCode = config.audioControlCode || 'admin123';
-    if (trimmed === serverAdminCode) return true;
-
-    // 3. Room join code or master code
-    if (room.joinCode && trimmed === room.joinCode) return true;
-    if (config.roomJoinCode && trimmed === config.roomJoinCode) return true;
-
-    return false;
+    if (!serverAdminCode || !trimmed) return false;
+    const expected = Buffer.from(serverAdminCode);
+    const provided = Buffer.from(trimmed);
+    return expected.length === provided.length && timingSafeEqual(expected, provided);
   }
 
   heartbeat(roomId: string, clientId: string, floorToken?: string): boolean {
@@ -184,11 +181,32 @@ export class RoomsService implements OnModuleDestroy {
     return !room.floor;
   }
 
-  isCurrentFloorHolder(roomId: string, clientId: string, floorToken: string): boolean {
+  /** Thêm tin chat của một thành viên; trả về tin đã chuẩn hóa để phát cho cả channel. */
+  addChat(roomId: string, clientId: string, text: string): ChatMessage {
+    const room = this.requireMember(roomId, clientId);
+    const message: ChatMessage = {
+      id: randomUUID(),
+      roomId,
+      clientId,
+      displayName: room.members.get(clientId)!.displayName,
+      text,
+      at: Date.now()
+    };
+    room.chat.push(message);
+    if (room.chat.length > CHAT_HISTORY_SIZE) room.chat.splice(0, room.chat.length - CHAT_HISTORY_SIZE);
+    return message;
+  }
+
+  chatHistory(roomId: string): ChatMessage[] {
+    return [...(this.rooms.get(roomId)?.chat ?? [])];
+  }
+
+  /** clientId đang giữ floor của channel (nếu lease còn hiệu lực). */
+  currentSpeaker(roomId: string): string | undefined {
     const room = this.rooms.get(roomId);
-    if (!room) return false;
+    if (!room) return undefined;
     this.expireRoomLease(room);
-    return room.floor?.clientId === clientId && room.floor.token === floorToken;
+    return room.floor?.clientId;
   }
 
   getFloorLeaseMs(): number {
@@ -197,8 +215,7 @@ export class RoomsService implements OnModuleDestroy {
 
   getRoomState(roomId: string): RoomStatePayload | undefined {
     const room = this.rooms.get(roomId);
-    if (!room) return undefined;
-    return this.snapshot(room);
+    return room ? this.snapshot(room) : undefined;
   }
 
   onModuleDestroy(): void {
@@ -207,10 +224,21 @@ export class RoomsService implements OnModuleDestroy {
     this.rooms.clear();
   }
 
+  private createRoom(channel: ChannelConfig): Room {
+    return {
+      roomId: channel.id,
+      name: channel.name,
+      color: channel.color,
+      ...(channel.pin ? { pinHash: hashPin(channel.pin) } : {}),
+      members: new Map(),
+      chat: []
+    };
+  }
+
   private requireMember(roomId: string, clientId: string): Room {
     const room = this.rooms.get(roomId);
     if (!room || !room.members.has(clientId)) {
-      throw new Error('Client is not an active member of this room.');
+      throw new Error('Client is not an active member of this channel.');
     }
     return room;
   }
@@ -218,16 +246,9 @@ export class RoomsService implements OnModuleDestroy {
   private snapshot(room: Room): RoomStatePayload {
     return {
       roomId: room.roomId,
-      creatorClientId: room.creatorClientId,
       phase: room.floor ? 'TALKING' : 'IDLE',
       speakerClientId: room.floor?.clientId,
-      members: [...room.members.values()].map(({ clientId, displayName, department, position }) => ({
-        clientId,
-        displayName,
-        department,
-        position,
-        isAdmin: clientId === room.creatorClientId
-      }))
+      members: [...room.members.values()].map(({ clientId, displayName }) => ({ clientId, displayName }))
     };
   }
 

@@ -2,40 +2,70 @@ import { Inject, Logger } from '@nestjs/common';
 import { ConnectedSocket, MessageBody, OnGatewayConnection, OnGatewayDisconnect, SubscribeMessage, WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
 import type { Server, Socket } from 'socket.io';
 import {
+  CHAT_MAX_LENGTH,
   ClientEvent,
   finiteNumber,
   isRecord,
   nonEmptyString,
   ServerEvent,
-  type AudioRelayProfile,
-  type CloseMediaPayload,
+  type ChannelInfo,
   type ConnectWebRtcTransportPayload,
   type CreateWebRtcTransportPayload,
   type ErrorPayload,
   type HeartbeatPayload,
-  type JoinRoomPayload,
-  type Position2D,
+  type JoinChannelPayload,
   type ProduceAudioPayload,
   type ReleaseFloorPayload,
   type ResumeAudioConsumerPayload,
+  type RoomStatePayload,
   type SocketAck,
-  type UpdateAudioProfilePayload,
-  type WebRtcTransportParameters
+  type UpdateAudioProfilePayload
 } from '@mpc-voicelink/protocol';
 import { readConfig } from '../config/config.js';
 import { MediaService, type ConsumerClosedDispatch, type ConsumerDispatch } from '../media/media.service.js';
-import { RoomsService } from '../rooms/rooms.service.js';
+import { JoinChannelError, RoomsService } from '../rooms/rooms.service.js';
 
 interface SocketSession {
-  roomId: string;
+  roomId?: string;
   clientId: string;
 }
 
 type AckCallback<T> = (response: SocketAck<T>) => void;
 
+class AckError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+  }
+}
+
+/** Giới hạn số lần nhập sai PIN theo địa chỉ IP. */
+class AttemptThrottle {
+  private readonly entries = new Map<string, { count: number; resetAt: number }>();
+
+  isBlocked(key: string, now = Date.now()): boolean {
+    const entry = this.entries.get(key);
+    if (!entry) return false;
+    if (entry.resetAt <= now) {
+      this.entries.delete(key);
+      return false;
+    }
+    return entry.count >= readConfig().joinMaxFailures;
+  }
+
+  recordFailure(key: string, now = Date.now()): void {
+    const entry = this.entries.get(key);
+    if (!entry || entry.resetAt <= now) {
+      this.entries.set(key, { count: 1, resetAt: now + readConfig().joinBlockMs });
+      return;
+    }
+    entry.count += 1;
+  }
+}
+
 @WebSocketGateway({
   cors: {
     origin: (_origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+      // FE được phục vụ từ chính server này (cùng origin); cho phép mọi origin trong LAN.
       callback(null, true);
     },
     methods: ['GET', 'POST'],
@@ -45,6 +75,12 @@ type AckCallback<T> = (response: SocketAck<T>) => void;
 export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly logger = new Logger(SignalingGateway.name);
   private readonly sessions = new Map<string, SocketSession>();
+  private readonly pinThrottle = new AttemptThrottle();
+  /** Thời điểm các tin chat gần đây theo socket (tối đa CHAT_BURST tin / CHAT_WINDOW_MS). */
+  private readonly chatTimes = new Map<string, number[]>();
+  /** Thao tác pause/resume Producer theo floor được tuần tự hóa cho từng channel. */
+  private readonly floorQueues = new Map<string, Promise<void>>();
+  private channelsUpdateTimer?: NodeJS.Timeout;
 
   @WebSocketServer()
   private server!: Server;
@@ -53,77 +89,56 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
     @Inject(RoomsService) private readonly rooms: RoomsService,
     @Inject(MediaService) private readonly media: MediaService
   ) {
-    this.rooms.onFloorReleased(({ payload, floorToken }) => {
-      this.emitConsumerClosures(this.media.closeProducerForFloor(
-        payload.roomId,
-        payload.previousSpeakerClientId,
-        floorToken
-      ));
-      this.server.to(payload.roomId).emit(ServerEvent.FloorReleased, payload);
-      this.broadcastRoomState(payload.roomId);
+    this.rooms.onFloorReleased(({ payload }) => {
+      // Khóa Producer trước rồi mới báo FLOOR_RELEASED.
+      void this.enqueueFloor(payload.roomId, async () => {
+        await this.media.setProducerPaused(payload.roomId, payload.previousSpeakerClientId, true);
+        this.server.to(payload.roomId).emit(ServerEvent.FloorReleased, payload);
+        this.broadcastRoomState(payload.roomId);
+      });
     });
   }
 
   handleConnection(socket: Socket): void {
-    this.logger.log(`Signaling client connected: ${socket.id}`);
-    this.registerMediaHandlers(socket);
+    this.logger.log(`Client connected: ${socket.id} (${this.clientIp(socket)})`);
+    socket.on('disconnect', (reason) => {
+      const session = this.sessions.get(socket.id);
+      this.logger.log(`Client disconnected: ${socket.id} (${this.clientIp(socket)}) channel=${session?.roomId ?? '-'} reason=${reason}`);
+    });
+    this.registerAckHandlers(socket);
   }
 
-  async handleDisconnect(socket: Socket): Promise<void> {
+  handleDisconnect(socket: Socket): void {
+    this.chatTimes.delete(socket.id);
     this.emitConsumerClosures(this.media.closeClientMedia(socket.id));
     const session = this.sessions.get(socket.id);
     this.sessions.delete(socket.id);
-    if (!session) return;
-
-    socket.leave(session.roomId);
-    const { state } = this.rooms.leave(session.roomId, session.clientId);
-    this.server.to(session.roomId).emit(ServerEvent.ClientDisconnected, {
-      roomId: session.roomId,
-      clientId: session.clientId
-    });
-    if (state) this.server.to(session.roomId).emit(ServerEvent.RoomState, state);
-  }
-
-  @SubscribeMessage(ClientEvent.JoinRoom)
-  joinRoom(@ConnectedSocket() socket: Socket, @MessageBody() body: unknown): void {
-    try {
-      const payload = this.parseJoin(body);
-      if (this.sessions.has(socket.id)) {
-        this.sendError(socket, 'ALREADY_JOINED', 'Socket already belongs to a room.');
-        return;
-      }
-
-      const state = this.rooms.join({ ...payload, socketId: socket.id });
-      this.sessions.set(socket.id, { roomId: payload.roomId, clientId: payload.clientId });
-      socket.join(payload.roomId);
-      socket.emit(ServerEvent.RoomState, state);
-      socket.emit(ServerEvent.AudioProfile, this.media.getAudioProfile());
-      socket.to(payload.roomId).emit(ServerEvent.RoomState, state);
-    } catch (error) {
-      this.sendError(socket, 'JOIN_FAILED', this.errorMessage(error));
-    }
+    if (session?.roomId) this.leaveRoom(socket, session, true);
   }
 
   @SubscribeMessage(ClientEvent.RequestFloor)
   requestFloor(@ConnectedSocket() socket: Socket): void {
     try {
-      const session = this.requireSession(socket);
+      const session = this.requireChannel(socket);
       const result = this.rooms.requestFloor(session.roomId, session.clientId);
       if (!result.granted) {
-        socket.emit(ServerEvent.FloorDenied, {
-          roomId: session.roomId,
-          speakerClientId: result.speakerClientId
-        });
+        socket.emit(ServerEvent.FloorDenied, { roomId: session.roomId, speakerClientId: result.speakerClientId });
         return;
       }
 
-      socket.emit(ServerEvent.FloorGranted, {
-        roomId: session.roomId,
-        floorToken: result.floorToken,
-        expiresAt: result.expiresAt,
-        heartbeatIntervalMs: readConfig().heartbeatIntervalMs
+      // Mở Producer trước rồi mới báo FLOOR_GRANTED để tiếng nói đi ngay khi client bật track.
+      void this.enqueueFloor(session.roomId, async () => {
+        if (this.rooms.currentSpeaker(session.roomId) !== session.clientId) return;
+        await this.media.setProducerPaused(session.roomId, session.clientId, false);
+        socket.emit(ServerEvent.FloorGranted, {
+          roomId: session.roomId,
+          floorToken: result.floorToken,
+          expiresAt: result.expiresAt,
+          heartbeatIntervalMs: readConfig().heartbeatIntervalMs
+        });
+        this.server.to(session.roomId).emit(ServerEvent.RoomState, result.state);
+        this.scheduleChannelsUpdate();
       });
-      this.server.to(session.roomId).emit(ServerEvent.RoomState, result.state);
     } catch (error) {
       this.sendError(socket, 'FLOOR_REQUEST_FAILED', this.errorMessage(error));
     }
@@ -132,12 +147,10 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
   @SubscribeMessage(ClientEvent.ReleaseFloor)
   releaseFloor(@ConnectedSocket() socket: Socket, @MessageBody() body: unknown): void {
     try {
-      const session = this.requireSession(socket);
+      const session = this.requireChannel(socket);
       const payload = this.parseRelease(body);
       const released = this.rooms.releaseFloor(session.roomId, session.clientId, payload.floorToken);
-      if (!released) {
-        this.sendError(socket, 'STALE_FLOOR_TOKEN', 'Floor lease is no longer active.');
-      }
+      if (!released) this.sendError(socket, 'STALE_FLOOR_TOKEN', 'Floor lease is no longer active.');
     } catch (error) {
       this.sendError(socket, 'FLOOR_RELEASE_FAILED', this.errorMessage(error));
     }
@@ -146,7 +159,7 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
   @SubscribeMessage(ClientEvent.Heartbeat)
   heartbeat(@ConnectedSocket() socket: Socket, @MessageBody() body: unknown): void {
     try {
-      const session = this.requireSession(socket);
+      const session = this.requireChannel(socket);
       const payload = this.parseHeartbeat(body);
       const valid = this.rooms.heartbeat(session.roomId, session.clientId, payload.floorToken);
       if (!valid) this.sendError(socket, 'STALE_FLOOR_TOKEN', 'Floor lease is no longer active.');
@@ -155,145 +168,202 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
     }
   }
 
-  @SubscribeMessage(ClientEvent.UpdatePosition)
-  updatePosition(@ConnectedSocket() socket: Socket, @MessageBody() body: unknown): void {
-    try {
-      const session = this.requireSession(socket);
-      if (!isRecord(body) || !finiteNumber(body.x) || !finiteNumber(body.y)) {
-        throw new Error('UPDATE_POSITION requires valid x and y coordinates.');
+  private registerAckHandlers(socket: Socket): void {
+    this.onAck(socket, ClientEvent.ListChannels, (): ChannelInfo[] => this.rooms.listChannels());
+
+    this.onAck(socket, ClientEvent.JoinChannel, async (body): Promise<RoomStatePayload> => {
+      const ip = this.clientIp(socket);
+      if (this.pinThrottle.isBlocked(ip)) {
+        throw new AckError('PIN_BLOCKED', 'Nhập sai PIN quá nhiều lần. Vui lòng thử lại sau ít phút.');
       }
-      const position: Position2D = {
-        x: Math.max(0, Math.min(100, body.x)),
-        y: Math.max(0, Math.min(100, body.y)),
-        zone: typeof body.zone === 'string' ? body.zone : undefined
-      };
-      const state = this.rooms.updatePosition(session.roomId, session.clientId, position);
-      this.server.to(session.roomId).emit(ServerEvent.RoomState, state);
-    } catch (error) {
-      this.sendError(socket, 'UPDATE_POSITION_FAILED', this.errorMessage(error));
-    }
-  }
+      const payload = this.parseJoin(body);
+      const current = this.sessions.get(socket.id);
+      if (current && current.clientId !== payload.clientId) {
+        throw new AckError('JOIN_FAILED', 'Socket đã gắn với một client khác.');
+      }
+      if (current?.roomId === payload.channelId) {
+        return this.rooms.getRoomState(payload.channelId)!;
+      }
 
-  private registerMediaHandlers(socket: Socket): void {
-    socket.on(ClientEvent.GetMediaCapabilities, (_body: unknown, callback: unknown) => {
-      this.respond(socket, callback, () => {
-        this.requireSession(socket);
-        return {
-          routerRtpCapabilities: this.media.getRouterRtpCapabilities(),
-          audioProfile: this.media.getAudioProfile()
-        };
-      });
-    });
-
-    socket.on(ClientEvent.CreateWebRtcTransport, (body: unknown, callback: unknown) => {
-      this.respond(socket, callback, async () => {
-        const session = this.requireSession(socket);
-        const payload = this.parseCreateTransport(body);
-        const result = await this.media.createWebRtcTransport({
+      let state: RoomStatePayload;
+      try {
+        state = this.rooms.join({
+          roomId: payload.channelId,
+          clientId: payload.clientId,
+          displayName: payload.displayName,
           socketId: socket.id,
-          roomId: session.roomId,
-          clientId: session.clientId,
-          ...payload
+          pin: payload.pin
         });
-        return {
-          transport: result.transport,
-          consumers: result.consumers.map((dispatch) => dispatch.payload)
-        };
-      });
+      } catch (error) {
+        if (error instanceof JoinChannelError) {
+          if (error.code === 'PIN_INVALID') this.pinThrottle.recordFailure(ip);
+          throw new AckError(error.code, error.message);
+        }
+        throw error;
+      }
+
+      // Rời channel cũ sau khi đã vào được channel mới (đổi channel không bị "rơi" giữa chừng).
+      if (current?.roomId) this.leaveRoom(socket, current, false);
+      const session: SocketSession = { roomId: payload.channelId, clientId: payload.clientId };
+      this.sessions.set(socket.id, session);
+      socket.join(payload.channelId);
+
+      const changes = await this.media.enterRoom(socket.id, payload.clientId, payload.channelId);
+      this.emitConsumerClosures(changes.closed);
+      this.emitNewConsumers(changes.created);
+      socket.emit(ServerEvent.AudioProfile, this.media.getAudioProfile());
+      socket.emit(ServerEvent.ChatHistory, { roomId: payload.channelId, messages: this.rooms.chatHistory(payload.channelId) });
+      socket.to(payload.channelId).emit(ServerEvent.RoomState, state);
+      this.scheduleChannelsUpdate();
+      return state;
     });
 
-    socket.on(ClientEvent.ConnectWebRtcTransport, (body: unknown, callback: unknown) => {
-      this.respond(socket, callback, async () => {
-        const payload = this.parseConnectTransport(body);
-        await this.media.connectWebRtcTransport(socket.id, payload.transportId, payload.dtlsParameters);
-        return {};
-      });
+    this.onAck(socket, ClientEvent.SendChat, (body) => {
+      const session = this.requireChannel(socket);
+      const text = this.parseChatText(body);
+      if (!this.chatAllowed(socket.id)) {
+        throw new AckError('CHAT_RATE_LIMITED', 'Gửi quá nhanh, chờ một chút.');
+      }
+      const message = this.rooms.addChat(session.roomId, session.clientId, text);
+      this.server.to(session.roomId).emit(ServerEvent.ChatMessage, message);
+      return message;
     });
 
-    socket.on(ClientEvent.ProduceAudio, (body: unknown, callback: unknown) => {
-      this.respond(socket, callback, async () => {
-        const session = this.requireSession(socket);
-        const payload = this.parseProduceAudio(body);
-        if (!this.rooms.isCurrentFloorHolder(session.roomId, session.clientId, payload.floorToken)) {
-          throw new Error('A current floor lease is required to produce audio.');
-        }
-        const result = await this.media.produceAudio({ socketId: socket.id, ...payload });
-        this.emitConsumerClosures(result.closedConsumers);
-        this.emitNewConsumers(result.consumers);
-        return { producerId: result.producerId };
-      });
+    this.onAck(socket, ClientEvent.LeaveChannel, () => {
+      const session = this.sessions.get(socket.id);
+      if (session?.roomId) this.leaveRoom(socket, session, false);
+      return {};
     });
 
-    socket.on(ClientEvent.ResumeAudioConsumer, (body: unknown, callback: unknown) => {
-      this.respond(socket, callback, async () => {
-        const payload = this.parseResumeConsumer(body);
-        await this.media.resumeAudioConsumer(socket.id, payload.consumerId);
-        return {};
-      });
+    this.onAck(socket, ClientEvent.GetMediaCapabilities, () => {
+      this.requireChannel(socket);
+      return {
+        routerRtpCapabilities: this.media.getRouterRtpCapabilities(),
+        audioProfile: this.media.getAudioProfile()
+      };
     });
 
-    socket.on(ClientEvent.CloseMedia, (body: unknown, callback: unknown) => {
-      this.respond(socket, callback, () => {
-        const session = this.requireSession(socket);
-        const payload = this.parseCloseMedia(body);
-        if (payload.floorToken && !this.rooms.isCurrentFloorHolder(session.roomId, session.clientId, payload.floorToken)) {
-          throw new Error('Floor lease is no longer active.');
-        }
-        this.emitConsumerClosures(this.media.closeClientMedia(socket.id));
-        if (payload.floorToken) this.rooms.releaseFloor(session.roomId, session.clientId, payload.floorToken);
-        return {};
+    this.onAck(socket, ClientEvent.CreateWebRtcTransport, async (body) => {
+      const session = this.requireChannel(socket);
+      const payload = this.parseCreateTransport(body);
+      const result = await this.media.createWebRtcTransport({
+        socketId: socket.id,
+        clientId: session.clientId,
+        ...payload
       });
+      return {
+        transport: result.transport,
+        consumers: result.consumers.map((dispatch) => dispatch.payload)
+      };
     });
 
-    socket.on(ClientEvent.UpdateAudioProfile, (body: unknown, callback: unknown) => {
-      this.respond(socket, callback, () => {
-        const session = this.requireSession(socket);
-        const payload = this.parseAudioProfileUpdate(body);
-        const isAuthorized = this.rooms.validateAdmin(session.roomId, session.clientId, payload.controlCode);
-        if (!isAuthorized) {
-          throw new Error('Bạn không có quyền quản trị (Chỉ chủ phòng hoặc người có mã admin mới được chỉnh).');
-        }
-        const profile = this.media.updateAudioProfile(payload);
-        this.server.to(session.roomId).emit(ServerEvent.AudioProfile, profile);
-        return profile;
-      });
+    this.onAck(socket, ClientEvent.ConnectWebRtcTransport, async (body) => {
+      const payload = this.parseConnectTransport(body);
+      await this.media.connectWebRtcTransport(socket.id, payload.transportId, payload.dtlsParameters);
+      return {};
     });
 
-    socket.on(ClientEvent.ForceReleaseFloor, (body: unknown, callback: unknown) => {
-      this.respond(socket, callback, () => {
-        const session = this.requireSession(socket);
-        const controlCode = isRecord(body) && typeof body.controlCode === 'string' ? body.controlCode : undefined;
-        const isAuthorized = this.rooms.validateAdmin(session.roomId, session.clientId, controlCode);
-        if (!isAuthorized) {
-          throw new Error('Chỉ chủ phòng (Admin) mới có quyền cưỡng chế thu hồi mic.');
-        }
-        const { released, floorToken, state } = this.rooms.forceReleaseFloor(session.roomId);
-        if (released && floorToken) {
-          this.emitConsumerClosures(this.media.closeProducerForFloor(session.roomId, released.previousSpeakerClientId, floorToken));
-          this.server.to(session.roomId).emit(ServerEvent.FloorReleased, released);
-        }
-        if (state) {
-          this.server.to(session.roomId).emit(ServerEvent.RoomState, state);
-        }
-        return { success: true };
+    this.onAck(socket, ClientEvent.RestartIce, async (body) => {
+      if (!isRecord(body) || !nonEmptyString(body.transportId)) {
+        throw new Error('RESTART_ICE requires transportId.');
+      }
+      return { iceParameters: await this.media.restartIce(socket.id, body.transportId) };
+    });
+
+    this.onAck(socket, ClientEvent.ProduceAudio, async (body) => {
+      const session = this.requireChannel(socket);
+      const payload = this.parseProduceAudio(body);
+      const result = await this.media.produceAudio({
+        socketId: socket.id,
+        transportId: payload.transportId,
+        rtpParameters: payload.rtpParameters,
+        startResumed: this.rooms.currentSpeaker(session.roomId) === session.clientId
       });
+      this.emitConsumerClosures(result.closedConsumers);
+      this.emitNewConsumers(result.consumers);
+      return { producerId: result.producerId };
+    });
+
+    this.onAck(socket, ClientEvent.ResumeAudioConsumer, async (body) => {
+      const payload = this.parseResumeConsumer(body);
+      await this.media.resumeAudioConsumer(socket.id, payload.consumerId);
+      return {};
+    });
+
+    this.onAck(socket, ClientEvent.CloseMedia, () => {
+      this.emitConsumerClosures(this.media.closeClientMedia(socket.id));
+      return {};
+    });
+
+    this.onAck(socket, ClientEvent.UpdateAudioProfile, (body) => {
+      const session = this.requireChannel(socket);
+      const payload = this.parseAudioProfileUpdate(body);
+      if (!this.rooms.validateAdmin(payload.controlCode)) {
+        throw new AckError('FORBIDDEN', 'Sai mã admin (AUDIO_CONTROL_CODE).');
+      }
+      const profile = this.media.updateAudioProfile(payload);
+      this.server.to(session.roomId).emit(ServerEvent.AudioProfile, profile);
+      return profile;
+    });
+
+    this.onAck(socket, ClientEvent.ForceReleaseFloor, (body) => {
+      const session = this.requireChannel(socket);
+      const controlCode = isRecord(body) && typeof body.controlCode === 'string' ? body.controlCode : undefined;
+      if (!this.rooms.validateAdmin(controlCode)) {
+        throw new AckError('FORBIDDEN', 'Sai mã admin (AUDIO_CONTROL_CODE).');
+      }
+      this.rooms.forceReleaseFloor(session.roomId);
+      return { success: true };
     });
   }
 
-  private respond<T>(socket: Socket, callback: unknown, action: () => T | Promise<T>): void {
-    if (typeof callback !== 'function') {
-      this.sendError(socket, 'ACK_REQUIRED', 'Realtime media requests require a Socket.IO acknowledgement callback.');
-      return;
-    }
+  private leaveRoom(socket: Socket, session: SocketSession, disconnected: boolean): void {
+    const roomId = session.roomId;
+    if (!roomId) return;
+    if (!disconnected) this.emitConsumerClosures(this.media.leaveRoom(socket.id));
+    socket.leave(roomId);
+    session.roomId = undefined;
+    const { state } = this.rooms.leave(roomId, session.clientId, socket.id);
+    this.server.to(roomId).emit(ServerEvent.ClientDisconnected, { roomId, clientId: session.clientId });
+    if (state) this.server.to(roomId).emit(ServerEvent.RoomState, state);
+    this.scheduleChannelsUpdate();
+  }
 
-    const acknowledgement = callback as AckCallback<T>;
-    void Promise.resolve(action())
-      .then((data) => acknowledgement({ ok: true, data }))
-      .catch((error: unknown) => {
-        const message = this.errorMessage(error);
-        this.logger.warn(`Media request failed for socket ${socket.id}: ${message}`);
-        acknowledgement({ ok: false, error: { code: 'MEDIA_REQUEST_FAILED', message } });
-      });
+  private enqueueFloor(roomId: string, task: () => Promise<void>): Promise<void> {
+    const previous = this.floorQueues.get(roomId) ?? Promise.resolve();
+    const next = previous.then(task).catch((error: unknown) => {
+      this.logger.warn(`Floor media update failed in ${roomId}: ${this.errorMessage(error)}`);
+    });
+    this.floorQueues.set(roomId, next);
+    return next;
+  }
+
+  /** Gộp nhiều thay đổi liên tiếp thành một CHANNELS_UPDATE gửi tới mọi client. */
+  private scheduleChannelsUpdate(): void {
+    if (this.channelsUpdateTimer) return;
+    this.channelsUpdateTimer = setTimeout(() => {
+      this.channelsUpdateTimer = undefined;
+      this.server.emit(ServerEvent.ChannelsUpdate, this.rooms.listChannels());
+    }, 100);
+  }
+
+  private onAck<T>(socket: Socket, event: string, action: (body: unknown) => T | Promise<T>): void {
+    socket.on(event, (body: unknown, callback: unknown) => {
+      if (typeof callback !== 'function') {
+        this.sendError(socket, 'ACK_REQUIRED', `${event} requires a Socket.IO acknowledgement callback.`);
+        return;
+      }
+      const acknowledgement = callback as AckCallback<T>;
+      // new Promise để lỗi ném đồng bộ trong action vẫn được trả về qua ack.
+      void new Promise<T>((resolve) => resolve(action(body)))
+        .then((data) => acknowledgement({ ok: true, data }))
+        .catch((error: unknown) => {
+          const code = error instanceof AckError ? error.code : 'REQUEST_FAILED';
+          const message = this.errorMessage(error);
+          if (!(error instanceof AckError)) this.logger.warn(`${event} failed for socket ${socket.id}: ${message}`);
+          acknowledgement({ ok: false, error: { code, message } });
+        });
+    });
   }
 
   private emitNewConsumers(dispatches: ConsumerDispatch[]): void {
@@ -311,35 +381,48 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
   private broadcastRoomState(roomId: string): void {
     const state = this.rooms.getRoomState(roomId);
     if (state) this.server.to(roomId).emit(ServerEvent.RoomState, state);
+    this.scheduleChannelsUpdate();
   }
 
-  private requireSession(socket: Socket): SocketSession {
+  private requireChannel(socket: Socket): { roomId: string; clientId: string } {
     const session = this.sessions.get(socket.id);
-    if (!session) throw new Error('JOIN_ROOM is required before this action.');
-    return session;
+    if (!session?.roomId) throw new Error('JOIN_CHANNEL is required before this action.');
+    return { roomId: session.roomId, clientId: session.clientId };
   }
 
-  private parseJoin(body: unknown): JoinRoomPayload {
-    if (!isRecord(body) || !nonEmptyString(body.roomId) || !nonEmptyString(body.clientId) ||
-        !nonEmptyString(body.displayName) || !nonEmptyString(body.joinCode)) {
-      throw new Error('JOIN_ROOM requires non-empty roomId, clientId, displayName and joinCode.');
+  private parseJoin(body: unknown): JoinChannelPayload {
+    if (!isRecord(body) || !nonEmptyString(body.channelId) || !nonEmptyString(body.clientId) ||
+        !nonEmptyString(body.displayName)) {
+      throw new AckError('JOIN_FAILED', 'JOIN_CHANNEL requires channelId, clientId and displayName.');
     }
-    const position = isRecord(body.position) && finiteNumber(body.position.x) && finiteNumber(body.position.y)
-      ? {
-          x: Math.max(0, Math.min(100, body.position.x)),
-          y: Math.max(0, Math.min(100, body.position.y)),
-          zone: typeof body.position.zone === 'string' ? body.position.zone : undefined
-        }
-      : undefined;
-
     return {
-      roomId: body.roomId.trim(),
-      clientId: body.clientId.trim(),
-      displayName: body.displayName.trim(),
-      joinCode: body.joinCode,
-      department: typeof body.department === 'string' && body.department.trim() ? body.department.trim() : undefined,
-      position
+      channelId: body.channelId.trim(),
+      clientId: body.clientId.trim().slice(0, 64),
+      displayName: body.displayName.trim().slice(0, 40),
+      pin: typeof body.pin === 'string' && body.pin.trim() ? body.pin.trim() : undefined
     };
+  }
+
+  private parseChatText(body: unknown): string {
+    if (!isRecord(body) || typeof body.text !== 'string') throw new AckError('CHAT_INVALID', 'Tin nhắn không hợp lệ.');
+    // Bỏ ký tự điều khiển (giữ xuống dòng), gộp khoảng trắng thừa ở hai đầu.
+    const text = body.text.replace(/[\u0000-\u0009\u000B-\u001F\u007F]/g, '').trim();
+    if (!text) throw new AckError('CHAT_INVALID', 'Tin nhắn trống.');
+    if (text.length > CHAT_MAX_LENGTH) throw new AckError('CHAT_TOO_LONG', `Tin nhắn tối đa ${CHAT_MAX_LENGTH} ký tự.`);
+    return text;
+  }
+
+  private chatAllowed(socketId: string, now = Date.now()): boolean {
+    const CHAT_BURST = 5;
+    const CHAT_WINDOW_MS = 5000;
+    const recent = (this.chatTimes.get(socketId) ?? []).filter((at) => now - at < CHAT_WINDOW_MS);
+    if (recent.length >= CHAT_BURST) {
+      this.chatTimes.set(socketId, recent);
+      return false;
+    }
+    recent.push(now);
+    this.chatTimes.set(socketId, recent);
+    return true;
   }
 
   private parseRelease(body: unknown): ReleaseFloorPayload {
@@ -379,16 +462,10 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
   }
 
   private parseProduceAudio(body: unknown): ProduceAudioPayload {
-    if (!isRecord(body) || !nonEmptyString(body.transportId) || !nonEmptyString(body.floorToken) ||
-        body.kind !== 'audio' || !isRecord(body.rtpParameters)) {
-      throw new Error('PRODUCE_AUDIO requires an audio send transport, current floor token and RTP parameters.');
+    if (!isRecord(body) || !nonEmptyString(body.transportId) || body.kind !== 'audio' || !isRecord(body.rtpParameters)) {
+      throw new Error('PRODUCE_AUDIO requires an audio send transport and RTP parameters.');
     }
-    return {
-      transportId: body.transportId,
-      floorToken: body.floorToken,
-      kind: 'audio',
-      rtpParameters: body.rtpParameters
-    };
+    return { transportId: body.transportId, kind: 'audio', rtpParameters: body.rtpParameters };
   }
 
   private parseResumeConsumer(body: unknown): ResumeAudioConsumerPayload {
@@ -396,21 +473,6 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
       throw new Error('RESUME_AUDIO_CONSUMER requires consumerId.');
     }
     return { consumerId: body.consumerId };
-  }
-
-  private parseCloseMedia(body: unknown): CloseMediaPayload {
-    if (body === undefined || body === null) return {};
-    if (!isRecord(body)) throw new Error('CLOSE_MEDIA payload must be an object.');
-    if (body.floorToken !== undefined && !nonEmptyString(body.floorToken)) {
-      throw new Error('CLOSE_MEDIA floorToken must be a non-empty string.');
-    }
-    if (body.reason !== undefined && body.reason !== 'client_request' && body.reason !== 'transport_failure') {
-      throw new Error('CLOSE_MEDIA reason is invalid.');
-    }
-    return {
-      ...(body.floorToken !== undefined ? { floorToken: body.floorToken } : {}),
-      ...(body.reason !== undefined ? { reason: body.reason } : {})
-    };
   }
 
   private parseAudioProfileUpdate(body: unknown): UpdateAudioProfilePayload {
@@ -432,8 +494,11 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
     socket.emit(ServerEvent.Error, payload);
   }
 
+  private clientIp(socket: Socket): string {
+    return socket.handshake.address || 'unknown';
+  }
+
   private errorMessage(error: unknown): string {
     return error instanceof Error ? error.message : 'Unexpected signaling error.';
   }
 }
-

@@ -1,0 +1,7 @@
+[
+  { "id": "tong", "name": "Kênh Tổng", "color": "#f97316" },
+  { "id": "bcn", "name": "Ban Chủ nhiệm", "color": "#f59e0b", "pin": "2468" },
+  { "id": "ky-thuat", "name": "Kỹ thuật", "color": "#0ea5e9" },
+  { "id": "truyen-thong", "name": "Truyền thông", "color": "#a855f7" },
+  { "id": "hau-can", "name": "Hậu cần", "color": "#22c55e" }
+]

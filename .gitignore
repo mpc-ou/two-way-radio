@@ -7,3 +7,6 @@ coverage/
 certs/
 *.log
 
+
+# Channel list may contain PINs
+apps/server/channels.json

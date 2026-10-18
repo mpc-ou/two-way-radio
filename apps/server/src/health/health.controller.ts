@@ -9,28 +9,21 @@ export class HealthController {
     @Inject(RoomsService) private readonly rooms: RoomsService
   ) {}
 
-  @Get()
-  root(): Record<string, unknown> {
-    return {
-      name: 'MPC VoiceLink Signaling & Media Relay Server',
-      status: 'online',
-      message: 'Server đang hoạt động bình thường. Giao diện Web PTT chạy tại cổng 5173 (https://<IP>:5173).',
-      healthEndpoint: '/health',
-      socketEndpoint: '/socket.io',
-      timestamp: new Date().toISOString()
-    };
-  }
-
   @Get('health')
-  status(): Record<string, unknown> {
+  async status(): Promise<Record<string, unknown>> {
     return {
       status: 'ok',
       floorLeaseMs: this.rooms.getFloorLeaseMs(),
-      relayProfile: this.media.getRelayProfile(),
+      channels: this.rooms.listChannels().map(({ id, memberCount, speakerName }) => ({
+        id,
+        memberCount,
+        talking: Boolean(speakerName)
+      })),
+      relayProfile: this.media.getAudioProfile(),
       media: this.media.getDiagnostics(),
+      traffic: await this.media.getTrafficStats(),
       recording: false,
       timestamp: new Date().toISOString()
     };
   }
 }
-

@@ -1,82 +1,80 @@
 # MPC VoiceLink — Trạng thái dự án
 
-Cập nhật: 2026-10-14 (Asia/Ho_Chi_Minh)
+Cập nhật: 2026-10-17 (Asia/Ho_Chi_Minh)
 
 ## Trạng thái tổng quan
 
-Dự án đã được khởi tạo lại thành ứng dụng trình duyệt chạy trong mạng LAN. Mã nguồn Flutter/mobile đã được chủ động loại bỏ. Repository hiện là monorepo Turborepo gồm web client React/Vite, server NestJS/mediasoup và một package protocol dùng chung.
+Repository là monorepo Turborepo với hai chế độ:
 
-Dự án đã có luồng audio realtime trong mã nguồn: browser tạo mediasoup transport, chỉ lấy microphone/produce sau khi server cấp floor, server xác thực floor token, tạo Consumer cho người nghe và browser phát audio qua Web Audio. Chưa có kết quả kiểm thử microphone, UDP mediasoup và audio giữa các thiết bị thật trong Hotspot.
+- **LAN (chính):** `apps/server` là **một tiến trình NestJS** phục vụ HTTPS, giao diện web đã build (`apps/web/dist`), Socket.IO và mediasoup SFU. `apps/web` (React 19 + **Vite 8**, chỉ build/`build --watch`) là giao diện mobile-first: nhập tên một lần, chọn **channel cố định** (PIN tùy chọn), giữ nút để nói.
+- **P2P Serverless:** `apps/web-p2p` (PeerJS, Vercel). Không thay đổi trong đợt này.
 
-## Hạng mục đã hoàn thành
+Ngày 2026-10-17 chế độ LAN được viết lại theo plan "NestJS một service + Vite 8, channel cố định, mobile-first". Mô hình room key và Vite dev server/proxy trước đó đã bị thay thế.
 
-| Hạng mục | Trạng thái | Nội dung hiện có |
-|---|---|---|
-| Monorepo | Hoàn thành | npm workspaces + Turborepo điều phối `apps/web`, `apps/server` và `packages/protocol`. |
-| Web client | Hoàn thành (chưa test thiết bị thật) | React/Vite kết nối Socket.IO, vào phòng, xin/nhả floor, tạo mediasoup recv/send transport, lấy mic sau `FLOOR_GRANTED`, produce Opus và phát Consumer audio. PTT tự nhả khi mất focus/đổi tab và chặn lệnh release trùng. |
-| Protocol dùng chung | Hoàn thành | `packages/protocol` quản lý hằng số event và khai báo TypeScript payload, được dùng ở cả server lẫn trình duyệt. |
-| Lõi PTT server | Hoàn thành | Thành viên phòng, quyền nói tuần tự cho một người, nhả bằng token, gia hạn heartbeat, hết hạn và khôi phục khi mất kết nối. |
-| Signaling server | Hoàn thành | Handler Socket.IO kiểm tra room/floor và các yêu cầu media ack: capability, tạo/kết nối transport, Producer, Consumer, teardown và audio profile. |
-| Nền tảng mediasoup | Hoàn thành (chưa test UDP thật) | Worker/router Opus, WebRtcTransport UDP, Producer/Consumer paused-resume và cleanup theo floor/disconnect. |
-| UI audio | Hoàn thành (chưa test thiết bị thật) | Slider gain mic/loa, target playout profile, level mic, RTT cấp floor/WebRTC, jitter và packet loss; **Bật loa** prewarm/resume AudioContext trong user gesture cho browser điện thoại; runtime profile cần `AUDIO_CONTROL_CODE`. |
-| Sẵn sàng TLS cho trình duyệt | Một phần | Local CA/certificate SAN đã được tạo; `apps/server/.env` và `apps/web/.env.local` đã trỏ tới certificate/key và CORS HTTPS LAN. NestJS HTTPS, certificate verification và Socket.IO WSS handshake với origin web LAN đã đạt cục bộ. Cần cài/trust CA trên điện thoại và kiểm thử audio HTTPS/WSS thật. |
-| Flutter/mobile | Đã chủ động loại bỏ | `apps/mobile` không còn thuộc dự án hoặc lộ trình. |
-| Quy tắc kỹ thuật | Hoàn thành | `SKILL.md` ở root quy định kiến trúc, PTT, bảo mật, code, kiểm tra và tài liệu cho các người/AI phát triển tiếp theo. |
+## Chế độ LAN — đã làm
 
-## Đã kiểm tra cục bộ sau khi chuyển sang web
+| Hạng mục | Nội dung |
+|---|---|
+| Một service | `main.ts` chạy HTTPS (`PORT=443`), phục vụ `WEB_DIST_PATH` bằng Express của Nest (asset hash cache lâu, `index.html` no-cache, SPA fallback trừ `/health` và `/socket.io`), in URL LAN khi khởi động. Không còn `apps/web/.env.local`, `CORS_ORIGINS` hay Vite proxy. |
+| Channel cố định | `CHANNELS_FILE` (`apps/server/channels.json`, bị Git bỏ qua; mẫu `channels.example.json`) khai báo `{ id, name, color, pin? }`. `RoomsService` tạo room cho mỗi channel lúc boot, PIN lưu dạng SHA-256 và so sánh `timingSafeEqual`, tối đa `MAX_MEMBERS_PER_ROOM=15`. Sai PIN quá `JOIN_MAX_FAILURES` lần thì chặn theo IP. |
+| Protocol | `LIST_CHANNELS`, `JOIN_CHANNEL` (ack trả `ROOM_STATE` hoặc mã lỗi `PIN_REQUIRED/PIN_INVALID/PIN_BLOCKED/CHANNEL_FULL/CHANNEL_NOT_FOUND`), `LEAVE_CHANNEL`, `RESTART_ICE`, push `CHANNELS_UPDATE` (số người, ai đang nói). Bỏ `CREATE_ROOM`, `JOIN_ROOM`, room key, `UPDATE_POSITION`. |
+| Producer PAUSED (độ trễ thấp) | Vào channel là mở mic và produce ngay. Server tạo Producer `paused` và chỉ `resume()` khi cấp floor (rồi mới gửi `FLOOR_GRANTED`); nhả, hết lease, thu hồi hay mất kết nối thì `pause()` trước rồi mới gửi `FLOOR_RELEASED`. Thao tác pause/resume tuần tự theo từng channel để không bị race. Consumer tạo sẵn cho mọi Producer trong channel. |
+| Đổi channel | Cùng socket, giữ transport (không bắt tay ICE/DTLS lại). Server đóng Producer/Consumer cũ, tạo Consumer mới; client tạo lại Producer. |
+| Phục hồi | Socket.IO tự kết nối lại và vào lại channel cuối. Thành viên chỉ bị xóa khi chính socket đó rời (socket mới vào lại trước khi server xử lý disconnect cũ không bị đá). ICE restart khi transport `disconnected` (sau 1,5 s) hoặc `failed`; 8 s vẫn hỏng thì dựng lại toàn bộ kết nối. |
+| Admin | Chỉ còn `AUDIO_CONTROL_CODE` (so sánh constant-time). Để trống thì tắt admin. Đã bỏ fallback `admin123`. |
+| Chat theo channel | `SEND_CHAT` (ack), server đẩy `CHAT_MESSAGE` cho đúng channel; khi vào channel nhận `CHAT_HISTORY` (50 tin gần nhất, `CHAT_HISTORY_SIZE`). Chỉ giữ trong RAM. Server kiểm tra: phải đang ở channel, bỏ ký tự điều khiển, tối đa `CHAT_MAX_LENGTH`=500 ký tự, tối đa 5 tin / 5 giây mỗi socket. UI: `ChatPanel` ngay dưới nút mic (nút mic thu nhỏ còn `min(58vw, 32dvh, 15rem)`), tự cuộn khi đang ở cuối, Space trong ô chat không kích hoạt PTT, viewport `interactive-widget=resizes-content` để bàn phím Android thu layout thay vì che. |
+| Báo lỗi cho người dùng | `services/connectionIssues.ts` chuyển lỗi kỹ thuật thành câu tiếng Việt kèm gợi ý: lý do `disconnect` của Socket.IO (`ping timeout`, `transport close/error`, `io server disconnect`), `connect_error` (không tới được server), sự kiện `offline/online` của trình duyệt, ICE/âm thanh thất bại, trang không HTTPS hoặc trình duyệt không hỗ trợ WebRTC, ack `TIMEOUT`. `ConnectionBanner` cố định dưới thanh trên (thời gian mất kết nối, số lần thử lại, mã gốc), tự ẩn khi nối lại, kèm toast "Đã kết nối lại sau X giây. Đã vào <channel>." Menu → **Nhật ký sự cố**: 50 sự kiện gần nhất, nút sao chép (kèm user agent) để gửi người vận hành. Server log mỗi lần ngắt kèm channel và lý do. |
+| Chọn thiết bị âm thanh | `services/audioDevices.ts` liệt kê micro/loa; `VoiceMedia.setInputDevice` mở micro theo `deviceId` rồi `producer.replaceTrack` (không ngắt kết nối, giữ trạng thái pause/floor); `setOutputDevice` dùng `setSinkId` cho mọi `<audio>` và AudioContext tiếng bíp (chỉ Chrome/Edge; Safari/iOS hiện lời giải thích). Theo dõi `devicechange`: báo thiết bị mới trong nhật ký, tự chuyển lại sang micro đã chọn khi tai nghe/Bluetooth kết nối lại, loa đã chọn biến mất thì về mặc định. Track micro kết thúc (rút tai nghe) thì tự chuyển về micro mặc định thay vì ngắt cả kết nối như trước. Lưu lựa chọn trong localStorage. UI: `DevicePicker` trong Menu → Âm thanh, kèm dòng "Đang thu". |
+| Health | `/health`: channel (số người, đang nói), số Producer/paused/Consumer, byte RTP vào từ từng Producer và tổng byte chuyển tiếp. |
+| Web client | `VoiceLinkClient` (socket + channel + máy trạng thái PTT, không phụ thuộc React) và `VoiceMedia` (mediasoup-client: mic mono EC/NS/AGC, Opus FEC, DTX tắt, ptime 20; mỗi người nói một `<audio>` riêng, không qua Web Audio; `jitterBufferTarget`/`playoutDelayHint`; bíp talk-permit/kết thúc/bận; mức mic, RTT, jitter, mất gói). React đọc state qua `useSyncExternalStore`. |
+| UI mobile | Một màn hình `100dvh`: TopBar (channel + số người, chấm trạng thái, ☰), banner "ai đang nói", nút PTT lớn (Space trên máy tính), chip số người. `ChannelSheet` là bottom sheet, PIN nhập ngay tại dòng. `AppDrawer` có các mục gập: Âm thanh, Thành viên, Chẩn đoán, Chia sẻ (QR), Admin, Tài khoản. Wake lock, PWA manifest. Đã xóa landing/bản đồ/ban/vị trí. |
+| Build/dev | `npm run dev:lan` (tsx watch + `vite build --watch`), `npm run start:lan`. Vite 8.3.2 và `@vitejs/plugin-react` 6.1.1 chỉ trong `apps/web`; `web-p2p` vẫn Vite 7. |
+
+## Đã kiểm tra (2026-10-17)
 
 | Kiểm tra | Kết quả |
 |---|---|
-| `npm.cmd install` | Đạt; lockfile đã cập nhật Turbo, React/Vite và Socket.IO client. |
-| `npm.cmd run typecheck` | Đạt cho workspace server và web qua Turborepo. |
-| `npm.cmd run build` | Đạt; NestJS đã biên dịch và Vite đã tạo bundle production. |
-| Xem trước Vite production | Đạt; request HTTP cục bộ tới trang web đã build nhận mã `200`. Tiến trình preview đã được dừng sau đó. |
-| Khởi động server sau khi sửa DI | Đạt từ bản server đã biên dịch; NestJS đã đăng ký các event signaling và router mediasoup đã khởi tạo. Tiến trình kiểm tra đã được dừng sau đó. |
-| Smoke test floor trên server | Đạt sau khi chuyển sang shared protocol: yêu cầu đầu tiên thắng, yêu cầu đồng thời bị từ chối, nhả thành công, sau đó client còn lại nhận được floor. |
-| `npm.cmd run typecheck` sau media | Đạt cho web và server. |
-| `npm.cmd run build` sau media | Đạt; Vite bundle gồm `mediasoup-client`. |
-| Khởi động server đã build sau media | Đạt đến lúc mediasoup router khởi tạo; cổng `3000` đang được một tiến trình khác sử dụng nên test dùng cổng riêng đã khởi động thành công. |
-| Smoke test signaling media | Đạt với server cổng tách biệt/mã test tạm thời: JOIN_ROOM, lấy router RTP capabilities và tạo receive WebRtcTransport qua Socket.IO acknowledgement. |
-| Kiểm tra Hotspot/trình duyệt trên thiết bị thật | Chưa chạy. |
-| Kiểm tra microphone trình duyệt qua HTTPS/WSS | Chưa chạy. |
+| `npm run typecheck`, `npm run build` | Đạt cho `server`, `web`, `web-p2p`. |
+| Smoke test server qua `https://10.173.146.111:8443` (Socket.IO client, CA LAN) | Đạt 21/21: SPA + fallback + `/health`; danh sách channel; PIN thiếu/sai/đúng; channel không tồn tại; floor grant/deny/release; người nói hiển thị trong danh sách; đổi channel; `CHANNELS_UPDATE`; admin bị từ chối khi sai mã; kết nối lại cùng clientId; chặn dò PIN. |
+| E2E Chrome headless, 2 browser context, mic giả, HTTPS LAN | Đạt 14/14: hai máy vào channel, Producer khởi tạo PAUSED, không chuyển tiếp byte nào khi không ai nói; bấm PTT thì Producer resume (~77 ms đo bằng polling), ~31 kbps Opus chuyển tiếp A → B; B thấy "đang nói" và có `<audio>` đang phát; B bị từ chối khi A nói; nhả thì dừng chuyển tiếp ngay (0 byte); B nói được sau đó; đóng máy thì dọn Producer/Consumer. |
+| E2E đổi channel + PIN qua UI | Đạt 9/9: đổi channel bằng bottom sheet, Producer tạo lại trên cùng transport, Consumer tạo lại, A → B có tiếng sau khi đổi; channel khóa hiện ô PIN, PIN đúng vào được. Ảnh chụp 390×844 xác nhận layout. |
+| Chat (2026-10-18) | Smoke server 9/9: lịch sử khi vào, chỉ channel đó nhận, tin rỗng/quá dài bị từ chối, phải vào channel mới chat được, giới hạn 5 tin/5 s, người vào sau nhận đúng 50 tin cuối. E2E Chrome 5/5: hai máy chat qua UI, ô nhập tự xóa, Space khi đang gõ không bật mic, PTT vẫn chạy với layout mới; ảnh 390×844 kiểm tra layout. |
+| Tải đồng thời (2026-10-18) | 75 socket vào cùng lúc (5 channel): 75/75 trong 350 ms, p95 56 ms, 0 bị ngắt; tranh quyền 15 máy: 1 được/14 bị từ chối. Thử 12 Chrome headless trên cùng laptop: Chrome sập vì quá tải, không kết luận được; lần chạy đầu lộ lỗi `recv transport already exists` (mục Rủi ro 6). |
+| Báo lỗi kết nối (2026-10-18) | E2E Chrome 9/9: giả lập mất Wi-Fi thì hiện banner "Điện thoại đang mất Wi-Fi", có mạng lại thì có thông báo và banner ẩn; tắt server đột ngột thì hiện "Mất kết nối mạng tới server (transport close)" rồi "Không tới được server" kèm số lần thử lại; bật server lại thì có toast "Đã kết nối lại sau X giây", tự vào lại channel có media; nhật ký ghi đủ các sự kiện. |
+| Chọn micro/loa (2026-10-18) | E2E Chrome (thiết bị giả) 8/8: danh sách có tên thiết bị; đổi micro khi đang ở channel thì nhãn "Đang thu" đổi, không kết nối lại, PTT vẫn chuyển tiếp ~30 kbps, Producer khóa lại sau khi nhả; lựa chọn được lưu; đổi loa thì `sinkId` của mọi `<audio>` khớp. Chưa test rút/cắm tai nghe và Bluetooth thật. |
+| Thiết bị thật (Android/iOS) trên Wi-Fi | **Chưa chạy.** |
 
-## Công việc còn lại
+## Còn lại / rủi ro
 
-### Mốc tiếp theo: kiểm tra control plane trên LAN
+1. **Thiết bị thật:** đo bấm PTT → nghe (mục tiêu < 300 ms), tranh quyền 3–5 máy, khóa màn hình, tắt Wi-Fi 10 s rồi bật lại, đi giữa các AP (ICE restart), soak 30–60 phút, CPU/pin.
+2. **iOS Safari:** mic luôn mở khi ở channel (chấm cam), có thể đẩy âm thanh ra loa trong thay vì loa ngoài và âm lượng nhỏ. Nếu gặp: thử `navigator.audioSession.type = 'play-and-record'` (Safari 17+) hoặc tùy chọn chỉ mở mic khi bấm.
+3. **Firewall:** máy dev chưa có rule cho TCP 443 và UDP/TCP 44444, Wi-Fi đang ở profile Public.
+4. **Dev:** `vite build --watch` không có HMR; sửa FE xong phải tải lại trang.
+5. Audio profile (`UPDATE_AUDIO_PROFILE`) vẫn toàn cục, UI chưa dùng. Gain mic chỉ còn AGC của trình duyệt; âm lượng loa tối đa 100% (không qua Web Audio để giảm trễ).
+6. **Rớt dây chuyền khi Wi-Fi nghẽn** (chưa sửa): `VoiceMedia.start()` thử lại sẽ tạo trùng transport (server trả `recv transport already exists`) nên máy đó mất tiếng tới khi tải lại; mỗi `AUDIO_CONSUMER_CREATED` lại gọi `start()`; lỗi media dẫn tới ngắt cả socket (`onFatal`); kết nối lại đồng loạt (0,5–3 s) làm lại N² consumer + N² `RESUME`; máy im lặng vẫn gửi 50 gói/s (`zeroRtpOnPause: false`); mediasoup worker chết thì server chạy tiếp mà không có media. Server đã log mỗi lần ngắt kết nối kèm lý do.
+7. Chat: mỗi lần tải trang là một `clientId` mới nên tin cũ của chính mình hiện như của người khác (vẫn đúng tên). Lịch sử mất khi server khởi động lại.
+8. Chưa có unit test tự động trong repo; các script smoke/E2E hiện nằm ngoài repo, nên đưa vào `apps/server/test` + CI.
 
-1. Đặt `ROOM_JOIN_CODE`, `MEDIASOUP_ANNOUNCED_ADDRESS`, `CORS_ORIGINS` và (nếu cần chỉnh từ UI) `AUDIO_CONTROL_CODE` thực tế trong `apps/server/.env`.
-2. Cấp certificate cục bộ được hai thiết bị tin cậy; đặt đường dẫn cho server và `apps/web/.env.local`, sau đó chạy HTTPS/WSS.
-3. Mở URL HTTPS của Vite từ hai thiết bị cùng Hotspot, cấp quyền mic cho speaker và kiểm tra người nghe nhận audio.
-4. Kiểm tra Windows Firewall cho cổng TCP server/Vite và UDP `MEDIASOUP_RTC_MIN_PORT` đến `MEDIASOUP_RTC_MAX_PORT`.
-5. Kiểm tra hai yêu cầu PTT đồng thời, nhả nhanh, mất Wi-Fi/đóng tab speaker và quyền tiếp quản sau heartbeat expiry.
+## P2P Serverless — việc còn lại (không đổi)
 
-### Media cần nghiệm thu trên thiết bị thật
+1. Kiểm thử 2–5 thiết bị (cùng Wi-Fi, 4G ↔ Wi-Fi, Vercel); không có TURN.
+2. Quyền nói chỉ do client tự kiểm tra; hai người bấm cùng lúc đều phát được.
+3. Anchor rời phòng chưa có cơ chế chuyển anchor.
+4. `peer.on('error')` khác `unavailable-id` vẫn `resolve()` nên UI báo đã vào phòng.
+5. `GatewayModeSelector`/`JoinP2PRoomCard` hardcode URL LAN `https://172.22.177.111:5173`, đã lỗi thời: chế độ LAN giờ là `https://<IP>` cổng 443.
 
-1. Xác nhận ICE/DTLS/UDP WebRtcTransport kết nối từ đúng điện thoại/Hotspot; ghi nhận lỗi candidate/Firewall nếu có.
-2. Xác nhận browser chỉ gọi `getUserMedia` sau `FLOOR_GRANTED`, Producer bị từ chối khi floor token cũ và mic track thực sự dừng khi nhả.
-3. Xác nhận Consumer phát được audio, autoplay fallback **Bật loa** hoạt động và cleanup đúng khi speaker rời phòng.
-4. Benchmark bitrate 24/32/40 kbps với profile `OPUS_BITRATE`/`MAX_OUTGOING_BITRATE`; không đổi codec hay packetization chỉ dựa vào phỏng đoán.
+## Ràng buộc
 
-### Củng cố và đo lường
+- Server là nơi duy nhất quyết định ai được nói: Producer chỉ được resume sau khi server cấp floor; client bật track sau `FLOOR_GRANTED`.
+- Micro trên điện thoại cần HTTPS mà trình duyệt tin cậy (cài CA LAN).
+- Âm thanh chỉ đi trong LAN, không có cloud relay/TURN.
+- Không commit hoặc log `.env`, `channels.json`, private key, PIN, floor token hay audio.
 
-- Thêm unit/integration test cho client ID trùng, lease hết hạn, kết nối lại, yêu cầu floor song song và dọn tài nguyên.
-- Thêm metrics chỉ cục bộ, có giới hạn: độ trễ cấp floor, RTT, jitter, packet loss, CPU/RAM và số thành viên phòng.
-- Xác định chính sách âm thanh cũ/drop đã được kiểm thử; không có hàng đợi audio/stat không giới hạn.
-- Chạy test audio 2 client, tranh quyền 3–5 client, đóng tab/mất Wi-Fi cưỡng bức, người nghe chậm và soak test 30–60 phút.
-- Thay mã tham gia chung bằng xác thực theo người dùng/thiết bị nếu threat model yêu cầu.
+## Lệnh
 
-## Ràng buộc quan trọng
-
-- UI không được bật media chỉ vì nút PTT được bấm; bắt buộc phải có `FLOOR_GRANTED` từ server.
-- Microphone trình duyệt trong LAN yêu cầu HTTPS được chính trình duyệt đó tin cậy. HTTP chỉ dùng để kiểm thử UI/control.
-- MVP chỉ chạy LAN, không có cloud relay/TURN dự phòng. Nếu Hotspot chặn LAN hoặc UDP, cần sửa cấu hình Hotspot thay vì gửi âm thanh ra Internet.
-- Chính sách server có thể giới hạn bitrate và từ chối media cũ, nhưng không thể ép độ trễ đầu ra chính xác cho mọi trình duyệt/thiết bị.
-- Không bao giờ commit, in log hoặc làm lộ `apps/server/.env`, TLS private key, join code, floor token hay audio payload.
-
-## Lệnh hiện dùng
-
-    npm.cmd run dev
-    npm.cmd run dev:web
-    npm.cmd run dev:server
+    npm.cmd run dev:lan
+    npm.cmd run start:lan
+    npm.cmd run dev:p2p
+    npm.cmd run build:p2p
     npm.cmd run typecheck
     npm.cmd run build

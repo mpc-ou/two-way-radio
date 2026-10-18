@@ -1,0 +1,15 @@
+{
+  "name": "MPC VoiceLink",
+  "short_name": "VoiceLink",
+  "description": "Bộ đàm nội bộ qua Wi-Fi LAN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#07090e",
+  "theme_color": "#07090e",
+  "lang": "vi",
+  "icons": [
+    { "src": "/mpc-logo.webp", "type": "image/webp", "sizes": "any", "purpose": "any" }
+  ]
+}

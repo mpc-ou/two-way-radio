@@ -1,21 +1,27 @@
 export declare const ClientEvent: Readonly<{
-  JoinRoom: 'JOIN_ROOM';
+  ListChannels: 'LIST_CHANNELS';
+  JoinChannel: 'JOIN_CHANNEL';
+  LeaveChannel: 'LEAVE_CHANNEL';
+  SendChat: 'SEND_CHAT';
   RequestFloor: 'REQUEST_FLOOR';
   ReleaseFloor: 'RELEASE_FLOOR';
   Heartbeat: 'HEARTBEAT';
   GetMediaCapabilities: 'GET_MEDIA_CAPABILITIES';
   CreateWebRtcTransport: 'CREATE_WEBRTC_TRANSPORT';
   ConnectWebRtcTransport: 'CONNECT_WEBRTC_TRANSPORT';
+  RestartIce: 'RESTART_ICE';
   ProduceAudio: 'PRODUCE_AUDIO';
   ResumeAudioConsumer: 'RESUME_AUDIO_CONSUMER';
   CloseMedia: 'CLOSE_MEDIA';
   UpdateAudioProfile: 'UPDATE_AUDIO_PROFILE';
   ForceReleaseFloor: 'FORCE_RELEASE_FLOOR';
-  UpdatePosition: 'UPDATE_POSITION';
 }>;
 
 export declare const ServerEvent: Readonly<{
+  ChannelsUpdate: 'CHANNELS_UPDATE';
   RoomState: 'ROOM_STATE';
+  ChatHistory: 'CHAT_HISTORY';
+  ChatMessage: 'CHAT_MESSAGE';
   FloorGranted: 'FLOOR_GRANTED';
   FloorDenied: 'FLOOR_DENIED';
   FloorReleased: 'FLOOR_RELEASED';
@@ -34,19 +40,42 @@ export interface Position2D {
   zone?: string;
 }
 
-export interface JoinRoomPayload {
+/** Channel cố định do server khai báo (CHANNELS_FILE). */
+export interface ChannelInfo {
+  id: string;
+  name: string;
+  color: string;
+  hasPin: boolean;
+  memberCount: number;
+  maxMembers: number;
+  speakerName?: string;
+}
+
+export interface JoinChannelPayload {
+  channelId: string;
+  clientId: string;
+  displayName: string;
+  pin?: string;
+}
+
+/** Tin nhắn chat của một channel (chỉ giữ trong RAM server, không lưu đĩa). */
+export interface ChatMessage {
+  id: string;
   roomId: string;
   clientId: string;
   displayName: string;
-  joinCode: string;
-  department?: string;
-  position?: Position2D;
+  text: string;
+  /** Epoch ms do server gán. */
+  at: number;
 }
 
-export interface UpdatePositionPayload {
-  x: number;
-  y: number;
-  zone?: string;
+export interface SendChatPayload {
+  text: string;
+}
+
+export interface ChatHistoryPayload {
+  roomId: string;
+  messages: ChatMessage[];
 }
 
 export interface ReleaseFloorPayload {
@@ -69,6 +98,7 @@ export interface RoomMember {
   isAdmin?: boolean;
 }
 
+/** `roomId` là id của channel. */
 export interface RoomStatePayload {
   roomId: string;
   creatorClientId?: string;
@@ -141,9 +171,20 @@ export interface ConnectWebRtcTransportPayload {
   dtlsParameters: Record<string, unknown>;
 }
 
+export interface RestartIcePayload {
+  transportId: string;
+}
+
+export interface RestartIceResult {
+  iceParameters: Record<string, unknown>;
+}
+
+/**
+ * Producer được tạo ngay khi vào channel và luôn ở trạng thái PAUSED trên server;
+ * server chỉ resume khi cấp floor cho chính client đó.
+ */
 export interface ProduceAudioPayload {
   transportId: string;
-  floorToken: string;
   kind: 'audio';
   rtpParameters: Record<string, unknown>;
 }
@@ -155,6 +196,8 @@ export interface ProduceAudioResult {
 export interface AudioConsumerPayload {
   consumerId: string;
   producerId: string;
+  /** clientId của người sở hữu Producer. */
+  producerClientId: string;
   kind: 'audio';
   rtpParameters: Record<string, unknown>;
 }
@@ -170,7 +213,6 @@ export interface ResumeAudioConsumerPayload {
 }
 
 export interface CloseMediaPayload {
-  floorToken?: string;
   reason?: 'client_request' | 'transport_failure';
 }
 
@@ -193,6 +235,8 @@ export interface SocketAckFailure {
 
 export type SocketAck<T> = SocketAckSuccess<T> | SocketAckFailure;
 
+export declare const CHAT_MAX_LENGTH: number;
+export declare const CHAT_HISTORY_SIZE: number;
 export declare function isRecord(value: unknown): value is Record<string, unknown>;
 export declare function nonEmptyString(value: unknown): value is string;
 export declare function finiteNumber(value: unknown): value is number;

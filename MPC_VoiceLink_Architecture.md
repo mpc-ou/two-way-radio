@@ -1,149 +1,102 @@
-# MPC VoiceLink — Kiến trúc web LAN PTT
+# MPC VoiceLink — Kiến trúc LAN PTT
 
 ## 1. Quyết định chính
 
-MPC VoiceLink là web app bộ đàm Push-to-Talk, half-duplex chạy qua browser. Laptop là server LAN duy nhất: NestJS/Socket.IO xử lý control plane và mediasoup SFU relay WebRTC audio. Điện thoại phát Hotspot chỉ cung cấp mạng, không phải media server.
-
-Stack MVP:
+Bộ đàm Push-to-Talk half-duplex trên trình duyệt điện thoại. Một máy trong LAN chạy **một tiến trình NestJS** làm tất cả: HTTPS, phục vụ giao diện web đã build, Socket.IO (channel, quyền nói) và mediasoup SFU (relay Opus). Điện thoại chỉ cần mở `https://<IP-server>`, chọn channel và giữ nút để nói.
 
 | Lớp | Công nghệ | Vai trò |
 |---|---|---|
-| Web client | React + TypeScript + Vite | PTT UI, Socket.IO signaling, browser WebRTC/media |
-| Server | NestJS + Socket.IO | Room, floor lease, heartbeat, auth MVP, signaling |
-| Media | mediasoup | SFU relay Opus không transcoding |
-| Protocol | packages/protocol | Event constants và payload types dùng chung |
-| Monorepo | npm workspaces + Turborepo | Điều phối apps/web, apps/server, shared packages |
-| Network | HTTPS/WSS + UDP WebRTC trong LAN | Browser secure context và media relay |
-
-Không có Flutter/mobile native app trong kiến trúc mới.
+| Web | React 19 + Vite 8 (`vite build --watch`) | UI mobile-first, mediasoup-client, Socket.IO client |
+| Server | NestJS 11 + Express | HTTPS, static `apps/web/dist` + SPA fallback, `/health` |
+| Signaling | Socket.IO (cùng origin) | Danh sách channel, vào/rời/đổi channel, floor lease, heartbeat, thiết lập WebRTC |
+| Media | mediasoup 3 `WebRtcServer` | SFU Opus không transcode, một cổng UDP (TCP cùng cổng làm dự phòng) |
+| Protocol | `packages/protocol` | Hằng số event + kiểu payload dùng chung |
+| Monorepo | npm workspaces + Turborepo | `apps/server`, `apps/web`; `apps/web-p2p` độc lập |
 
 ## 2. Topology
 
 ```mermaid
-flowchart TD
-  H[Điện thoại Hotspot<br/>Wi-Fi LAN + 4G/5G uplink]
-  L[Laptop<br/>HTTPS web + NestJS/Socket.IO + mediasoup]
-  A[Browser client A]
-  B[Browser client B]
-  C[Browser client C]
-
-  H --- L
-  H --- A
-  H --- B
-  H --- C
-  A -->|HTTPS/WSS control| L
-  B -->|HTTPS/WSS control| L
-  C -->|HTTPS/WSS control| L
-  A -->|Opus/WebRTC UDP khi có floor| L
-  L -->|Opus/WebRTC UDP relay| B
-  L -->|Opus/WebRTC UDP relay| C
+flowchart LR
+  subgraph LAN[Wi-Fi LAN / mesh AP cùng subnet]
+    S[Máy server<br/>NestJS: HTTPS :443 + Socket.IO + mediasoup :44444]
+    A[Điện thoại A]
+    B[Điện thoại B]
+    C[Điện thoại C]
+  end
+  A -- HTTPS/WSS: trang web + điều khiển --> S
+  B -- HTTPS/WSS --> S
+  C -- HTTPS/WSS --> S
+  A -- Opus/SRTP UDP khi có floor --> S
+  S -- Opus/SRTP UDP --> B
+  S -- Opus/SRTP UDP --> C
 ```
 
-4G/5G của Hotspot không phải đường audio mặc định. Audio chỉ ở LAN khi HTTPS/WSS và UDP WebRTC tới laptop đều là địa chỉ LAN, không chuyển qua cloud/TURN.
+Âm thanh không ra Internet. Socket.IO chỉ mang tín hiệu điều khiển.
 
-## 3. Browser security boundary
+## 3. Channel
 
-Browser microphone yêu cầu secure context. localhost tiện cho UI development, nhưng browser ở điện thoại truy cập IP LAN bằng HTTP không phải môi trường audio production hợp lệ.
+- Khai báo trong `CHANNELS_FILE` (`[{ id, name, color, pin? }]`), tạo lúc server khởi động, không bao giờ bị xóa.
+- `LIST_CHANNELS` trả danh sách (số người, có PIN, ai đang nói); server đẩy `CHANNELS_UPDATE` khi có thay đổi.
+- `JOIN_CHANNEL { channelId, clientId, displayName, pin? }` trả `ROOM_STATE` hoặc lỗi `PIN_REQUIRED | PIN_INVALID | PIN_BLOCKED | CHANNEL_FULL | CHANNEL_NOT_FOUND`.
+- Đổi channel trên cùng socket: transport giữ nguyên; server đóng Producer/Consumer của channel cũ, tạo Consumer cho channel mới; client tạo lại Producer.
 
-- Laptop phải phục vụ origin HTTPS được client tin cậy trước getUserMedia.
-- Khi web origin HTTPS, signaling dùng WSS.
-- TLS certificate/key cấu hình bằng TLS_CERT_PATH và TLS_KEY_PATH; không commit key.
-- Browser vẫn trao đổi WebRTC/DTLS-SRTP trực tiếp với mediasoup UDP trên laptop.
-- Laptop là trust boundary của relay; DTLS-SRTP không làm laptop mù nội dung media.
+### Chat
 
-## 4. Control plane và floor state
+`SEND_CHAT { text }` (ack). Server phát `CHAT_MESSAGE` cho các thành viên của channel và gửi `CHAT_HISTORY` (50 tin gần nhất) khi có người vào. Tin chỉ nằm trong RAM; server kiểm tra người gửi đang ở channel, độ dài ≤ 500 ký tự, tối đa 5 tin/5 giây mỗi socket.
+
+## 4. Luồng nói (độ trễ thấp)
 
 ```mermaid
 sequenceDiagram
-  participant W as Browser
-  participant S as Socket.IO/NestJS
+  participant P as Điện thoại (nói)
+  participant S as NestJS gateway
   participant M as mediasoup
+  participant L as Người nghe
 
-  W->>S: REQUEST_FLOOR
-  S->>S: atomic room floor lease
-  alt room idle
-    S-->>W: FLOOR_GRANTED(token, expiry, heartbeat)
-    W->>M: create/resume Producer only after grant
-    M-->>S: producer active
-    S-->>W: ROOM_STATE(TALKING)
-  else room busy
-    S-->>W: FLOOR_DENIED
-  end
-  W->>S: HEARTBEAT(token)
-  W->>S: RELEASE_FLOOR(token)
-  S->>M: pause/close unauthorized or released producer
-  S-->>W: FLOOR_RELEASED + ROOM_STATE(IDLE)
+  Note over P,M: Khi vào channel: getUserMedia, send/recv transport,<br/>PRODUCE_AUDIO → Producer tạo PAUSED. Người nghe đã có Consumer.
+  P->>S: REQUEST_FLOOR
+  S->>S: cấp lease atomic (RoomsService)
+  S->>M: producer.resume()
+  S-->>P: FLOOR_GRANTED(token)
+  P->>P: producer.resume() cục bộ + bíp
+  P->>M: RTP Opus
+  M->>L: RTP Opus (Consumer có sẵn)
+  P->>S: HEARTBEAT(token) mỗi HEARTBEAT_INTERVAL_MS
+  P->>S: RELEASE_FLOOR(token)
+  S->>M: producer.pause()
+  S-->>P: FLOOR_RELEASED
 ```
 
-Room state:
+- Bấm PTT chỉ tốn một round-trip Socket.IO cộng `producer.resume()`. Không còn getUserMedia, produce hay tạo Consumer lúc bấm.
+- Server là nơi quyết định duy nhất. Client bật track sớm mà không có grant thì RTP vẫn bị drop vì Producer paused trên server.
+- Pause/resume theo floor được tuần tự hóa cho từng channel. Resume chỉ chạy nếu client vẫn đang giữ floor.
+- Hết lease, admin thu hồi (`AUDIO_CONTROL_CODE`) hay disconnect đều dẫn tới pause Producer trước rồi mới phát `FLOOR_RELEASED`.
 
-- IDLE: room does not have a floor holder.
-- REQUESTING: client-local pending request; server resolves it serially.
-- TALKING: exactly one valid client/token holder.
-- RELEASING: client/server is ending active producer and lease.
+## 5. Media
 
-The server, not the browser UI, decides every floor transition. Expiry, tab close, socket disconnect, stale token and missing heartbeat release the floor.
+- Opus mono 48 kHz, ptime 20 ms, in-band FEC, DTX tắt, `OPUS_BITRATE` (mặc định 32 kbps), `MAX_OUTGOING_BITRATE`.
+- Client: mic có EC/NS/AGC; mỗi Consumer phát qua một `<audio>` riêng (không qua Web Audio). Độ trễ phát chỉnh bằng `jitterBufferTarget`/`playoutDelayHint` (0–`TARGET_PLAYOUT_DELAY_MAX_MS`).
+- `MEDIASOUP_ANNOUNCED_ADDRESS` = IP LAN; để trống hoặc IP LAN cũ không còn trên máy thì server tự dò.
+- Phục hồi: ICE restart (`RESTART_ICE`) khi transport `disconnected/failed`; Socket.IO tự kết nối lại và vào lại channel cũ. Thành viên chỉ bị xóa bởi đúng socket sở hữu.
+- Server không bao giờ ghi âm, lưu hay log audio.
 
-## 5. Media lifecycle
+## 6. HTTPS
 
-Initial browser configuration is mono voice capture, Opus 48 kHz, 20 ms packetization and test bitrates 24/32/40 kbps. Standard WebRTC/mediasoup advertises Opus RTP as two-channel capability; client requests mono capture/stereo=0.
+Trình duyệt chỉ cho dùng micro trên origin HTTPS được tin cậy. `scripts/new-lan-tls.ps1` tạo CA + cert LAN; điện thoại cài CA một lần. Khi IP đổi, chạy lại với `-ReuseCa` để cấp cert mới mà không đổi CA.
 
-Mỗi client có send/receive WebRtcTransport riêng; server quản lý Producer, Consumer và quyền sở hữu cleanup. Một Producer chỉ hợp lệ khi floor lease tương ứng còn hiệu lực. Khi release/expiry:
+## 7. Cấu hình (`apps/server/.env`)
 
-1. Reject future media operations for the stale token.
-2. Pause or close the active Producer.
-3. Stop browser microphone track.
-4. Pause/close Consumers as appropriate.
-5. Close transports/resources on leave or disconnect.
+- `HOST`, `PORT` (443), `TLS_CERT_PATH`, `TLS_KEY_PATH`, `WEB_DIST_PATH`, `CHANNELS_FILE`
+- `MEDIASOUP_LISTEN_IP`, `MEDIASOUP_ANNOUNCED_ADDRESS`, `MEDIASOUP_PORT`, `MEDIASOUP_ENABLE_UDP/TCP`
+- `MAX_MEMBERS_PER_ROOM`, `JOIN_MAX_FAILURES`, `JOIN_BLOCK_MS`, `FLOOR_LEASE_MS`, `HEARTBEAT_INTERVAL_MS`
+- `OPUS_BITRATE`, `MAX_OUTGOING_BITRATE`, `TARGET_PLAYOUT_DELAY_*`, `AUDIO_CONTROL_CODE`
 
-No raw-audio Socket.IO, no server mixing/transcoding, no recordings, and no unbounded buffer.
+Cấu hình được đọc một lần lúc khởi động (`config/config.ts`).
 
-## 6. Monorepo
+## 8. Giới hạn
 
-```text
-apps/
-  web/                     React Vite browser UI
-  server/                  NestJS + Socket.IO + mediasoup
-packages/
-  protocol/                JavaScript event constants + TypeScript contracts
-turbo.json                 build/typecheck/dev task graph
-```
+- Độ trễ thực tế còn phụ thuộc jitter buffer và driver âm thanh của từng điện thoại; server không ép được.
+- Tầm xa phụ thuộc vùng phủ Wi-Fi: dùng nhiều AP cùng SSID/subnet, tắt client isolation.
+- Một worker/router mediasoup cho toàn server. Đủ cho LAN vài chục máy; mở rộng thì làm một router mỗi channel.
 
-Root commands:
-
-    npm.cmd run dev
-    npm.cmd run dev:web
-    npm.cmd run dev:server
-    npm.cmd run typecheck
-    npm.cmd run build
-
-Turborepo is required whenever adding a second app or shared package. Shared signaling contract belongs in packages/protocol; do not duplicate message strings or payload shapes.
-
-## 7. Runtime configuration
-
-apps/server/.env is local-only and ignored. apps/server/.env.example documents:
-
-- HOST, PORT, CORS_ORIGINS
-- TLS_CERT_PATH, TLS_KEY_PATH
-- room join code and floor/heartbeat timings
-- mediasoup listen/announced address and UDP range
-- Opus relay policy/bitrate limits
-
-The server can set relay policy, bitrate caps, lease duration and old-packet policy. It cannot force the same speaker-to-ear delay across browsers because jitter buffering, device drivers and OS audio scheduling are client-side factors.
-
-## 8. LAN smoke test before media
-
-1. Configure a real non-default join code and laptop LAN address.
-2. Open the HTTPS web URL from two devices on the actual Hotspot.
-3. Confirm WSS/Socket.IO, JOIN_ROOM and PTT floor contention.
-4. Check UDP mediasoup ports and Windows Firewall.
-5. Confirm microphone permission in browser on the HTTPS origin.
-6. Only then implement browser mediasoup transports and audio.
-
-If the Hotspot blocks laptop/client traffic or UDP, fix/replace network equipment. Do not silently route media through the Internet.
-
-## 9. Current implementation boundary
-
-Hiện đã có Turborepo, React PTT/audio UI, Socket.IO room/floor protocol, server floor lease, mediasoup router, WebRtcTransport UDP, Producer/Consumer lifecycle và Web Audio gain graph ở browser. Browser chỉ gọi `getUserMedia` sau `FLOOR_GRANTED`; server xác thực floor token trước khi nhận Producer và dọn Producer/Consumer khi floor kết thúc hoặc socket rời phòng.
-
-Chưa nghiệm thu audio trên Hotspot/điện thoại thật, HTTPS/WSS certificate trust, Windows Firewall/UDP, bitrate benchmark và soak test. `PROJECT_STATUS.md` là nguồn tiến độ chính thức.
+`PROJECT_STATUS.md` là nguồn tiến độ chính thức.

@@ -2,7 +2,7 @@
   "name": "mpc-voicelink",
   "version": "0.1.0",
   "private": true,
-  "description": "LAN-only browser Push-to-Talk voice system",
+  "description": "Browser Push-to-Talk: LAN SFU (NestJS + mediasoup) and P2P serverless",
   "packageManager": "npm@10.9.3",
   "workspaces": [
     "apps/*",
@@ -10,13 +10,16 @@
   ],
   "scripts": {
     "dev": "turbo run dev --parallel",
+    "dev:lan": "turbo run dev --filter=@mpc-voicelink/server --filter=@mpc-voicelink/web",
     "dev:web": "turbo run dev --filter=@mpc-voicelink/web",
     "dev:p2p": "turbo run dev --filter=@mpc-voicelink/web-p2p",
     "dev:server": "turbo run dev --filter=@mpc-voicelink/server",
     "build": "turbo run build",
     "build:p2p": "turbo run build --filter=@mpc-voicelink/web-p2p",
     "build:server": "turbo run build --filter=@mpc-voicelink/server",
-    "typecheck": "turbo run typecheck"
+    "typecheck": "turbo run typecheck",
+    "build:lan": "turbo run build --filter=@mpc-voicelink/server --filter=@mpc-voicelink/web",
+    "start:lan": "npm run build:lan && npm --workspace @mpc-voicelink/server run start"
   },
   "devDependencies": {
     "turbo": "^2.4.0"
@@ -26,4 +29,3 @@
     "npm": ">=10.0.0"
   }
 }
-

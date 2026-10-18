@@ -1,5 +1,11 @@
 # Prompt triển khai chi tiết — MPC VoiceLink Web
 
+> **Ghi chú 2026-10-17:** đây là bản đặc tả gốc. Các điểm sau đã được thay thế, xem `MPC_VoiceLink_Architecture.md` và `SKILL.md`:
+> - Một tiến trình NestJS phục vụ cả web (Vite 8 build) lẫn Socket.IO/mediasoup; không còn Vite dev server/proxy.
+> - Channel cố định do server khai báo (PIN tùy chọn) thay cho phòng/mã tham gia chung.
+> - Mic được mở khi vào channel; Producer tạo ở trạng thái PAUSED và chỉ server resume khi cấp floor (thay cho "chỉ getUserMedia sau FLOOR_GRANTED").
+
+
 Bạn là Software Architect và Senior Engineer chuyên về WebRTC browser, React, TypeScript, NestJS và mediasoup. Hãy thiết kế, triển khai và kiểm thử hệ thống bộ đàm LAN chạy trong trình duyệt có tên MPC VoiceLink theo các yêu cầu sau.
 
 ## 1. Mục tiêu sản phẩm

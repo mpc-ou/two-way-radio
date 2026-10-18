@@ -1,19 +1,26 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)]
-  [string]$LanIp,
+  [string[]]$LanIp,
   [ValidateRange(1, 3650)]
   [int]$CertificateDays = 825,
   [string]$OutputDirectory = 'certs',
-  [switch]$Force
+  [switch]$Force,
+  # Giữ nguyên CA đã cài trên điện thoại, chỉ cấp lại certificate máy chủ (vd: khi IP LAN đổi).
+  [switch]$ReuseCa
 )
 
 $ErrorActionPreference = 'Stop'
 
-$parsedIp = $null
-if (-not [System.Net.IPAddress]::TryParse($LanIp, [ref]$parsedIp) -or
-    $parsedIp.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
-  throw 'LanIp must be a valid IPv4 address, for example 192.168.1.2.'
+# powershell -File không tách dấu phẩy thành mảng; chấp nhận cả "ip1,ip2".
+$LanIp = @($LanIp | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+
+foreach ($candidateIp in $LanIp) {
+  $parsedIp = $null
+  if (-not [System.Net.IPAddress]::TryParse($candidateIp, [ref]$parsedIp) -or
+      $parsedIp.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
+    throw "LanIp '$candidateIp' must be a valid IPv4 address, for example 192.168.1.2."
+  }
 }
 
 $opensslCommand = Get-Command openssl -ErrorAction SilentlyContinue
@@ -35,7 +42,15 @@ $serverCertificate = Join-Path $certificateDirectory 'mpc-lan-cert.pem'
 $serverKey = Join-Path $certificateDirectory 'mpc-lan-key.pem'
 $serverRequest = Join-Path $certificateDirectory 'mpc-lan-cert.csr'
 $opensslConfig = Join-Path $certificateDirectory 'mpc-lan-openssl.cnf'
-$outputs = @($caCertificate, $caKey, $serverCertificate, $serverKey, $serverRequest, $opensslConfig)
+$outputs = if ($ReuseCa) {
+  @($serverCertificate, $serverKey, $serverRequest, $opensslConfig)
+} else {
+  @($caCertificate, $caKey, $serverCertificate, $serverKey, $serverRequest, $opensslConfig)
+}
+
+if ($ReuseCa -and -not ((Test-Path -LiteralPath $caCertificate) -and (Test-Path -LiteralPath $caKey))) {
+  throw "-ReuseCa requires existing $caCertificate and $caKey."
+}
 
 if ((Test-Path -LiteralPath $certificateDirectory) -and -not $Force -and
     ($outputs | Where-Object { Test-Path -LiteralPath $_ })) {
@@ -44,6 +59,7 @@ if ((Test-Path -LiteralPath $certificateDirectory) -and -not $Force -and
 
 New-Item -ItemType Directory -Force -Path $certificateDirectory | Out-Null
 
+$ipEntries = (($LanIp | ForEach-Object -Begin { $i = 0 } -Process { $i++; "IP.$i = $_" }) -join "`n")
 $machineName = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { 'mpc-voicelink' }
 $config = @"
 [req]
@@ -68,7 +84,7 @@ subjectKeyIdentifier = hash
 authorityKeyIdentifier = keyid:always,issuer
 
 [alternative_names]
-IP.1 = $LanIp
+$ipEntries
 DNS.1 = localhost
 DNS.2 = $machineName
 "@
@@ -92,10 +108,12 @@ function Invoke-OpenSsl {
 
  $completed = $false
 try {
-  Invoke-OpenSsl -Command 'genrsa' -ArgumentList @('-out', $caKey, '4096')
-  Invoke-OpenSsl -Command 'req' -ArgumentList @('-x509', '-new', '-sha256', '-days', '3650', '-key', $caKey,
-    '-out', $caCertificate, '-subj', '/CN=MPC VoiceLink Local Test CA', '-config', $opensslConfig,
-    '-extensions', 'ca_extensions')
+  if (-not $ReuseCa) {
+    Invoke-OpenSsl -Command 'genrsa' -ArgumentList @('-out', $caKey, '4096')
+    Invoke-OpenSsl -Command 'req' -ArgumentList @('-x509', '-new', '-sha256', '-days', '3650', '-key', $caKey,
+      '-out', $caCertificate, '-subj', '/CN=MPC VoiceLink Local Test CA', '-config', $opensslConfig,
+      '-extensions', 'ca_extensions')
+  }
   Invoke-OpenSsl -Command 'req' -ArgumentList @('-new', '-newkey', 'rsa:2048', '-nodes', '-keyout', $serverKey,
     '-out', $serverRequest, '-config', $opensslConfig)
   Invoke-OpenSsl -Command 'x509' -ArgumentList @('-req', '-in', $serverRequest, '-CA', $caCertificate, '-CAkey', $caKey,
@@ -106,11 +124,15 @@ try {
   Remove-Item -LiteralPath $opensslConfig -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $serverRequest -Force -ErrorAction SilentlyContinue
   if (-not $completed) {
-    Remove-Item -LiteralPath $caCertificate, $caKey, $serverCertificate, $serverKey,
-      (Join-Path $certificateDirectory 'mpc-lan-ca.srl') -Force -ErrorAction SilentlyContinue
+    $partial = if ($ReuseCa) { @($serverCertificate, $serverKey) } else {
+      @($caCertificate, $caKey, $serverCertificate, $serverKey, (Join-Path $certificateDirectory 'mpc-lan-ca.srl'))
+    }
+    Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
   }
 }
 
 Write-Host "Created LAN TLS files in $certificateDirectory"
-Write-Host "Install this CA certificate on every phone/browser before testing: $caCertificate"
+if (-not $ReuseCa) {
+  Write-Host "Install this CA certificate on every phone/browser before testing: $caCertificate"
+}
 Write-Host "Use these server files: $serverCertificate and $serverKey"
