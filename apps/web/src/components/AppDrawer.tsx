@@ -20,6 +20,7 @@ interface AppDrawerProps {
   onVolumeChange: (value: number) => void;
   onPlayoutDelayChange: (value: number) => void;
   onTestBeep: () => void;
+  onChatSoundChange: (enabled: boolean) => void;
   onInputDeviceChange: (deviceId: string | undefined) => void;
   onOutputDeviceChange: (deviceId: string | undefined) => void;
   onRename: (name: string) => void;
@@ -143,6 +144,7 @@ export function AppDrawer({
   onVolumeChange,
   onPlayoutDelayChange,
   onTestBeep,
+  onChatSoundChange,
   onInputDeviceChange,
   onOutputDeviceChange,
   onRename,
@@ -178,6 +180,18 @@ export function AppDrawer({
             <span className="flex justify-between"><span>Đệm chống giật (playout)</span><span className="font-mono">{playoutDelayMs} ms</span></span>
             <input type="range" min={0} max={maxDelay} step={10} value={playoutDelayMs} onChange={(e) => onPlayoutDelayChange(Number(e.target.value))} className="accent-orange-500" />
             <span className="text-[0.68rem] text-slate-500">0 = trễ thấp nhất. Tăng lên nếu tiếng bị rè/ngắt khi đi xa router.</span>
+          </label>
+          <label className="flex items-center justify-between gap-3 text-xs text-slate-300">
+            <span>
+              Âm báo tin nhắn mới
+              <span className="block text-[0.68rem] text-slate-500">Không kêu khi bạn đang nói.</span>
+            </span>
+            <input
+              type="checkbox"
+              checked={state.chatSound}
+              onChange={(e) => onChatSoundChange(e.target.checked)}
+              className="h-5 w-5 accent-orange-500"
+            />
           </label>
           <button type="button" onClick={onTestBeep} className="self-start rounded-xl border border-white/10 px-3 py-1.5 text-xs text-slate-200 active:bg-white/10">
             Thử tiếng bíp

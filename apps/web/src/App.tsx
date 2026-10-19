@@ -66,6 +66,19 @@ export function App() {
     };
   }, [client]);
 
+  // Trình duyệt điện thoại chỉ cho phát âm thanh (tiếng nói, âm báo chat) sau một thao tác của
+  // người dùng: mở khóa ở bất kỳ lần chạm/phím nào, không chỉ khi bấm nút nói.
+  useEffect(() => {
+    if (!client) return undefined;
+    const unlock = (): void => client.unlockAudio();
+    document.addEventListener('pointerdown', unlock, { passive: true });
+    document.addEventListener('keydown', unlock);
+    return () => {
+      document.removeEventListener('pointerdown', unlock);
+      document.removeEventListener('keydown', unlock);
+    };
+  }, [client]);
+
   const press = useCallback(() => client?.pressTalk(), [client]);
   const release = useCallback(() => client?.releaseTalk(), [client]);
 
@@ -197,6 +210,7 @@ export function App() {
           client.setPlayoutDelay(value);
         }}
         onTestBeep={() => client.testBeep()}
+        onChatSoundChange={(enabled) => client.setChatSound(enabled)}
         onInputDeviceChange={(deviceId) => void client.setInputDevice(deviceId)}
         onOutputDeviceChange={(deviceId) => void client.setOutputDevice(deviceId)}
         onRename={(name) => {

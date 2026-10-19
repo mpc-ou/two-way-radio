@@ -50,6 +50,7 @@ Khi kết nối lại thành công sẽ có thông báo **"Đã kết nối lạ
 | **Nhập sai PIN quá nhiều lần…** | Sai PIN quá `JOIN_MAX_FAILURES` (mặc định 8) lần trong `JOIN_BLOCK_MS` (60 giây), bị chặn theo IP. | Chờ 1 phút rồi nhập đúng PIN. |
 | **Channel đã đầy** / dòng channel hiện "Đầy" | Đã đủ `MAX_MEMBERS_PER_ROOM` (mặc định 15) người. | Chọn channel khác, hoặc vận hành tăng `MAX_MEMBERS_PER_ROOM` trong `.env` rồi khởi động lại server. |
 | **Server phản hồi chậm (mạng nghẽn)** | Yêu cầu không có phản hồi trong 8 giây. | Thử lại sau vài giây; kiểm tra Wi-Fi. |
+| Không nghe **âm báo tin nhắn** | Kiểm tra ☰ Menu → Âm thanh → **Âm báo tin nhắn mới** đang bật; chạm vào màn hình một lần (trình duyệt điện thoại chỉ cho phát âm thanh sau khi người dùng chạm); tắt chế độ im lặng/không làm phiền. Âm báo không kêu khi bạn đang giữ nút nói và chỉ kêu một lần cho nhiều tin liên tiếp (1,5 giây). | Bật lại công tắc, chạm màn hình, tăng âm lượng. |
 | **Gửi quá nhanh, chờ một chút** (chat) | Quá 5 tin trong 5 giây. | Chờ vài giây. |
 | **Tin nhắn tối đa 500 ký tự** | Tin quá dài. | Chia nhỏ tin. |
 | **Sai mã admin (AUDIO_CONTROL_CODE)** | Mã admin sai, hoặc server chưa đặt `AUDIO_CONTROL_CODE` (chức năng admin bị tắt). | Vận hành đặt `AUDIO_CONTROL_CODE` trong `apps/server/.env` rồi khởi động lại. |

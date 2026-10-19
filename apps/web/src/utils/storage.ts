@@ -8,7 +8,8 @@ const KEYS = {
   volume: 'mpc_volume',
   playoutDelay: 'mpc_playout_delay',
   inputDevice: 'mpc_input_device',
-  outputDevice: 'mpc_output_device'
+  outputDevice: 'mpc_output_device',
+  chatSound: 'mpc_chat_sound'
 } as const;
 
 function read(key: string): string | null {
@@ -53,7 +54,11 @@ export const storage = {
   getInputDevice: (): string | undefined => read(KEYS.inputDevice) || undefined,
   setInputDevice: (deviceId: string | undefined): void => write(KEYS.inputDevice, deviceId ?? null),
   getOutputDevice: (): string | undefined => read(KEYS.outputDevice) || undefined,
-  setOutputDevice: (deviceId: string | undefined): void => write(KEYS.outputDevice, deviceId ?? null)
+  setOutputDevice: (deviceId: string | undefined): void => write(KEYS.outputDevice, deviceId ?? null),
+
+  /** Âm báo khi có tin chat mới (mặc định bật). */
+  getChatSound: (): boolean => read(KEYS.chatSound) !== 'off',
+  setChatSound: (enabled: boolean): void => write(KEYS.chatSound, enabled ? 'on' : 'off')
 };
 
 /** Channel cho phép chọn qua link/QR: https://<server>/?channel=<id> */

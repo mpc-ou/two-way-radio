@@ -78,6 +78,8 @@ export interface VoiceLinkState {
   outputSelectable: boolean;
   /** Tên micro đang thu thực tế. */
   activeInputLabel?: string;
+  /** Phát âm báo khi có tin chat mới từ người khác. */
+  chatSound: boolean;
 }
 
 const INITIAL_STATE: VoiceLinkState = {
@@ -93,8 +95,12 @@ const INITIAL_STATE: VoiceLinkState = {
   log: [],
   inputs: [],
   outputs: [],
-  outputSelectable: false
+  outputSelectable: false,
+  chatSound: true
 };
+
+/** Khoảng cách tối thiểu giữa hai lần báo tin chat (tin đến dồn dập chỉ kêu một lần). */
+const CHAT_SOUND_GAP_MS = 1500;
 
 const CHAT_KEEP = 100;
 const LOG_KEEP = 50;
@@ -126,6 +132,7 @@ export class VoiceLinkClient {
   private desiredChannelId?: string;
   private volume = storage.getVolume();
   private playoutDelayMs = storage.getPlayoutDelay();
+  private lastChatSoundAt = 0;
   private disconnectedAt?: number;
   private lastConnectError?: string;
   /** Thông báo "đã kết nối lại" chờ gộp với lần tự vào lại channel (tránh bị toast sau ghi đè). */
@@ -164,7 +171,8 @@ export class VoiceLinkClient {
       ...this.state,
       inputDeviceId: this.preferredInputId,
       outputDeviceId: storage.getOutputDevice(),
-      outputSelectable: canSelectOutput()
+      outputSelectable: canSelectOutput(),
+      chatSound: storage.getChatSound()
     };
     navigator.mediaDevices?.addEventListener?.('devicechange', this.onDeviceChange);
     void this.refreshDevices(false);
@@ -343,6 +351,15 @@ export class VoiceLinkClient {
     this.notify(`Âm thanh phát ra: ${this.deviceLabel(this.state.outputs, deviceId)}.`);
   }
 
+  setChatSound(enabled: boolean): void {
+    storage.setChatSound(enabled);
+    this.update({ chatSound: enabled });
+    if (enabled) {
+      this.media?.unlockAudio();
+      this.media?.beep('chat');
+    }
+  }
+
   testBeep(): void {
     this.media?.unlockAudio();
     this.media?.beep('permit');
@@ -451,6 +468,7 @@ export class VoiceLinkClient {
       if (message.roomId !== this.state.channelId) return;
       if (this.state.chat.some((item) => item.id === message.id)) return;
       this.update({ chat: [...this.state.chat, message].slice(-CHAT_KEEP) });
+      this.announceChat(message);
     });
 
     socket.on(ServerEvent.AudioProfile, (profile: AudioRelayProfile) => this.update({ profile }));
@@ -571,6 +589,8 @@ export class VoiceLinkClient {
         }
       }, { inputDeviceId: this.preferredInputId, outputDeviceId: this.state.outputDeviceId });
       this.media.setVolume(this.volume);
+      // Máy tính cho chạy AudioContext ngay; điện thoại cần thêm một lần chạm (App gọi unlockAudio ở mọi thao tác).
+      this.media.unlockAudio();
       this.media.setPlayoutDelay(this.playoutDelayMs);
     }
     this.update({ media: this.media.ready ? 'ready' : 'starting' });
@@ -626,6 +646,20 @@ export class VoiceLinkClient {
   private deviceLabel(list: DeviceOption[], deviceId: string | undefined): string {
     if (!deviceId) return 'mặc định của máy';
     return list.find((device) => device.deviceId === deviceId)?.label ?? 'thiết bị đã chọn';
+  }
+
+  /**
+   * Âm báo tin chat mới: chỉ tin của người khác, không kêu khi mình đang nói (tránh lọt vào micro),
+   * và gộp các tin đến dồn dập. Lịch sử tải về khi vào channel không đi qua đây.
+   */
+  private announceChat(message: ChatMessage): void {
+    if (!this.state.chatSound || message.clientId === this.clientId) return;
+    if (this.state.phase === 'TALKING' || this.state.phase === 'REQUESTING') return;
+    const now = Date.now();
+    if (now - this.lastChatSoundAt < CHAT_SOUND_GAP_MS) return;
+    this.lastChatSoundAt = now;
+    this.media?.beep('chat');
+    vibrate(20);
   }
 
   private channelName(channelId: string): string {

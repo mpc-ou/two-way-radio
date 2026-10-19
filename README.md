@@ -70,7 +70,7 @@ Server in ra các URL `https://<IP>` để mở trên điện thoại. Giao di�
 1. Lần đầu nhập **tên**, lưu trên máy.
 2. Chạm **channel** (có khóa thì nhập PIN ngay tại dòng đó). Lần sau tự vào lại channel cuối. Có thể mở thẳng `https://<IP>/?channel=<id>`.
 3. **Giữ nút tròn để nói**, nhả để dừng. Có tiếng bíp khi được cấp quyền và khi kết thúc; người khác đang nói thì nút hiện "KÊNH BẬN".
-4. **Chat** ngay dưới nút mic, riêng cho từng channel. Người vào sau thấy 50 tin gần nhất. Tin chỉ nằm trong RAM server, mất khi server khởi động lại.
+4. **Chat** ngay dưới nút mic, riêng cho từng channel. Người vào sau thấy 50 tin gần nhất. Tin chỉ nằm trong RAM server, mất khi server khởi động lại. Có **âm báo "ting-tong"** (kèm rung) khi người khác nhắn: không kêu với tin của mình, không kêu khi bạn đang giữ nút nói, tin đến dồn dập chỉ kêu một lần; bật/tắt ở ☰ Menu → Âm thanh.
 5. **Báo lỗi:** khi mất Wi-Fi, mất kết nối tới server hay mất đường âm thanh, một banner dưới thanh trên cùng nói rõ lý do, gợi ý cách xử lý, thời gian đã mất kết nối và số lần thử lại. Banner tự ẩn khi kết nối lại.
 6. **Chọn micro và loa/tai nghe** (☰ Menu → Âm thanh): micro máy, tai nghe có dây, Bluetooth. Đổi được ngay khi đang ở trong channel mà không mất kết nối. Rút tai nghe thì tự quay về micro máy; kết nối lại thì tự chuyển về thiết bị đã chọn. Lựa chọn được lưu trên máy. Chọn loa chỉ có trên Chrome/Edge; Safari/iPhone do hệ thống tự chuyển.
 7. **☰ Menu**: âm lượng, đệm chống giật, thành viên, chẩn đoán (RTT/jitter/mất gói), **nhật ký sự cố** (có nút sao chép để gửi người vận hành), QR chia sẻ, admin (thu hồi mic), đổi tên, rời channel.

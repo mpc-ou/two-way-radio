@@ -37,7 +37,16 @@ interface RemoteAudio {
   element: HTMLAudioElement;
 }
 
-type BeepKind = 'permit' | 'end' | 'busy';
+type BeepKind = 'permit' | 'end' | 'busy' | 'chat';
+
+/** [tần số Hz, bắt đầu sau (s), độ dài (s)] và âm lượng đỉnh của từng tiếng báo. */
+const BEEPS: Record<BeepKind, { tones: Array<[number, number, number]>; peak: number }> = {
+  permit: { tones: [[1250, 0, 0.07]], peak: 0.18 },
+  end: { tones: [[880, 0, 0.06]], peak: 0.18 },
+  busy: { tones: [[420, 0, 0.09], [420, 0.14, 0.09]], peak: 0.18 },
+  // "Ting-tong" nhẹ, khác hẳn tiếng bíp quyền nói để không nhầm.
+  chat: { tones: [[988, 0, 0.12], [1319, 0.13, 0.2]], peak: 0.12 }
+};
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error('Realtime media operation failed.');
@@ -175,18 +184,14 @@ export class VoiceMedia {
   beep(kind: BeepKind): void {
     const context = this.beepContext;
     if (!context || context.state !== 'running') return;
-    const tones: Array<[number, number, number]> = kind === 'permit'
-      ? [[1250, 0, 0.07]]
-      : kind === 'end'
-        ? [[880, 0, 0.06]]
-        : [[420, 0, 0.09], [420, 0.14, 0.09]];
+    const { tones, peak } = BEEPS[kind];
     for (const [frequency, offset, duration] of tones) {
       const oscillator = context.createOscillator();
       const gain = context.createGain();
       const start = context.currentTime + offset;
       oscillator.frequency.value = frequency;
       gain.gain.setValueAtTime(0.0001, start);
-      gain.gain.exponentialRampToValueAtTime(0.18, start + 0.01);
+      gain.gain.exponentialRampToValueAtTime(peak, start + 0.01);
       gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
       oscillator.connect(gain).connect(context.destination);
       oscillator.start(start);
